@@ -123,5 +123,5 @@ def add_ledger_entry(
 
 
 def list_ledger(supabase: Client, material_id: str) -> list[LedgerEntryResponse]:
-    r = supabase.schema(DB_SCHEMA).table("material_ledger").select("*").eq("material_id", material_id).order("created_at").execute()
+    r = supabase.schema(DB_SCHEMA).table("material_ledger").select("*").eq("material_id", material_id).order("created_at", desc=True).execute()
     return [LedgerEntryResponse(**row) for row in (r.data or [])]

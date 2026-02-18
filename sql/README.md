@@ -16,4 +16,4 @@ DDL for Supabase. All application tables live in the **fieldops** schema (not pu
 
 **If you see PGRST106** (schema must be public or graphql_public): run **010_expose_fieldops_schema.sql** in the SQL Editor.
 
-**Supabase**: Expose the `fieldops` schema in the API (Dashboard → Settings → API → “Exposed schemas” or PostgREST config) so the client can query it. Create storage buckets `attendance`, `daily_reports`, `expense` if using file uploads.
+**Supabase**: Expose the `fieldops` schema in the API (Dashboard → Settings → API → “Exposed schemas” or PostgREST config) so the client can query it. Create storage buckets `attendance`, `daily_reports`, `expense`, `material_receipts` if using file uploads. If signed URLs return 404 for existing objects: in Storage → bucket → Policies, allow the service role to read (SELECT); and ensure the backend uses `SUPABASE_SERVICE_ROLE_KEY` (not anon).

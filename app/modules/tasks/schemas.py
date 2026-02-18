@@ -42,6 +42,7 @@ class TaskResponse(BaseModel):
     description: str | None = None
     status_id: str | None = None
     assignee_id: str | None = None
+    assignee_name: str | None = None
     created_by: str | None = None
     due_at: str | None = None
     created_at: str | None = None

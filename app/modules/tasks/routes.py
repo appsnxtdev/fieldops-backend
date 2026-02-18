@@ -74,9 +74,13 @@ def delete_status_route(
 def list_tasks_route(
     project_id: str,
     access: dict = Depends(get_project_access(CAN_VIEW_PROJECT)),
+    current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
 ):
-    return list_tasks(supabase, project_id)
+    tasks = list_tasks(supabase, project_id)
+    if access.get("role") != "admin":
+        tasks = [t for t in tasks if t.assignee_id == current_user["id"]]
+    return tasks
 
 
 @router.get("/{project_id}/tasks/{task_id}", response_model=TaskResponse)

@@ -24,3 +24,5 @@ class AttendanceResponse(BaseModel):
     check_in_lng: float | None = None
     check_out_lat: float | None = None
     check_out_lng: float | None = None
+    user_full_name: str | None = None
+    user_email: str | None = None

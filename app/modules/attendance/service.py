@@ -4,6 +4,7 @@ from supabase import Client
 from app.core.constants import DB_SCHEMA
 from app.modules.attendance.geo import haversine_meters
 from app.modules.attendance.schemas import AttendanceResponse
+from app.modules.users.service import get_profiles_by_ids
 
 
 # Allow GPS/emulator variance; exact match can still show small distance due to float precision
@@ -112,4 +113,35 @@ def check_out(supabase: Client, project_id: str, user_id: str, date: str, lat: f
 
 def list_attendance(supabase: Client, project_id: str, date: str) -> list[AttendanceResponse]:
     r = supabase.schema(DB_SCHEMA).table("attendance").select("*").eq("project_id", project_id).eq("date", date).order("check_in_at").execute()
-    return [AttendanceResponse(**row) for row in (r.data or [])] if r else []
+    rows = list(r.data or []) if r else []
+    if not rows:
+        return []
+    user_ids = list({row["user_id"] for row in rows})
+    profiles = get_profiles_by_ids(supabase, user_ids)
+    profile_map = {p.id: p for p in profiles}
+    result = []
+    for row in rows:
+        profile = profile_map.get(row["user_id"])
+        result.append(
+            AttendanceResponse(
+                **row,
+                user_full_name=profile.full_name if profile else None,
+                user_email=profile.email if profile else None,
+            )
+        )
+    return result
+
+
+def list_attendance_in_range(supabase: Client, project_id: str, from_date: str, to_date: str) -> list[dict]:
+    """List attendance rows for a project between from_date and to_date (inclusive)."""
+    r = (
+        supabase.schema(DB_SCHEMA).table("attendance")
+        .select("*")
+        .eq("project_id", project_id)
+        .gte("date", from_date)
+        .lte("date", to_date)
+        .order("date")
+        .order("check_in_at")
+        .execute()
+    )
+    return list(r.data or [])
