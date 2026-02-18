@@ -1,0 +1,34 @@
+# Build and deploy fieldops-backend to Cloud Run.
+# Set substitutions: _REGION (e.g. us-central1), _SERVICE_NAME (e.g. fieldops-backend).
+# Run: gcloud builds submit --config=cloudbuild.yaml --substitutions=_REGION=us-central1,_SERVICE_NAME=fieldops-backend
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - gcr.io/${PROJECT_ID}/${_SERVICE_NAME}
+      - .
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - gcr.io/${PROJECT_ID}/${_SERVICE_NAME}
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE_NAME}
+      - --image
+      - gcr.io/${PROJECT_ID}/${_SERVICE_NAME}
+      - --region
+      - ${_REGION}
+      - --platform
+      - managed
+      - --allow-unauthenticated
+    id: deploy
+options:
+  logging: CLOUD_LOGGING_ONLY
+substitutions:
+  _REGION: us-central1
+  _SERVICE_NAME: fieldops-backend
