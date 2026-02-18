@@ -1,0 +1,53 @@
+# Cloud Run service descriptor (reference).
+# Deploy with: gcloud run services replace service.yaml
+# Or use: gcloud run deploy fieldops-backend --image IMAGE_URL --region REGION ...
+# Replace PROJECT_ID, REGION, and IMAGE_URL before use.
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: fieldops-backend
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/minScale: "0"
+    run.googleapis.com/maxScale: "10"
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      containers:
+        - image: gcr.io/PROJECT_ID/fieldops-backend
+          ports:
+            - name: http1
+              containerPort: 8080
+          env:
+            - name: ENV
+              value: production
+            - name: DEBUG
+              value: "false"
+            - name: LOG_LEVEL
+              value: INFO
+            # Set ALLOWED_ORIGINS to your frontend URL(s), e.g. https://your-app.example.com
+            # SUPABASE_*, CORE_SERVICE_*: use Secret Manager or set here for non-secrets
+          resources:
+            limits:
+              memory: 512Mi
+              cpu: "1"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 30
+            failureThreshold: 3

@@ -1,4 +1,4 @@
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Query
 from supabase import Client, create_client
 import logging
 
@@ -9,6 +9,8 @@ from app.core.permissions import has_permission
 
 
 def get_supabase_client(settings: Settings = Depends(get_settings)) -> Client:
+    if not settings.SUPABASE_URL or not settings.SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=503, detail="Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)")
     return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
 
 
@@ -120,6 +122,42 @@ def _first_row(result) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def ensure_project_access(
+    supabase: Client, tenant_id: str, user_id: str, project_id: str, required_permission: str
+) -> dict:
+    """Validate user has access to project and required permission. Returns access dict or raises HTTPException."""
+    proj_result = (
+        supabase.schema(DB_SCHEMA).table("projects")
+        .select("id, tenant_id")
+        .eq("id", project_id)
+        .maybe_single()
+        .execute()
+    )
+    proj = _first_row(proj_result)
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if str(proj.get("tenant_id")) != str(tenant_id):
+        raise HTTPException(status_code=403, detail="Project not in your tenant")
+    tenant_role = get_tenant_membership(tenant_id, user_id, supabase)
+    if tenant_role == "org_admin":
+        return {"project_id": project_id, "tenant_id": tenant_id, "role": "admin"}
+    mem_result = (
+        supabase.schema(DB_SCHEMA).table("project_members")
+        .select("role")
+        .eq("project_id", project_id)
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    mem = _first_row(mem_result)
+    if not mem:
+        raise HTTPException(status_code=403, detail="Not a project member")
+    role = mem.get("role") or "viewer"
+    if not has_permission(role, required_permission):
+        raise HTTPException(status_code=403, detail="Insufficient permission")
+    return {"project_id": project_id, "tenant_id": tenant_id, "role": role}
+
+
 def get_project_access(required_permission: str):
     """Dependency factory: ensure user has access to project and required permission. Org admins have access to all projects in their tenant."""
 
@@ -129,35 +167,20 @@ def get_project_access(required_permission: str):
         current_user: dict = Depends(get_current_user),
         supabase: Client = Depends(get_supabase_client),
     ) -> dict:
-        proj_result = (
-            supabase.schema(DB_SCHEMA).table("projects")
-            .select("id, tenant_id")
-            .eq("id", project_id)
-            .maybe_single()
-            .execute()
-        )
-        proj = _first_row(proj_result)
-        if not proj:
-            raise HTTPException(status_code=404, detail="Project not found")
-        if str(proj.get("tenant_id")) != str(tenant_id):
-            raise HTTPException(status_code=403, detail="Project not in your tenant")
-        tenant_role = get_tenant_membership(tenant_id, current_user["id"], supabase)
-        if tenant_role == "org_admin":
-            return {"project_id": project_id, "tenant_id": tenant_id, "role": "admin"}
-        mem_result = (
-            supabase.schema(DB_SCHEMA).table("project_members")
-            .select("role")
-            .eq("project_id", project_id)
-            .eq("user_id", current_user["id"])
-            .maybe_single()
-            .execute()
-        )
-        mem = _first_row(mem_result)
-        if not mem:
-            raise HTTPException(status_code=403, detail="Not a project member")
-        role = mem.get("role") or "viewer"
-        if not has_permission(role, required_permission):
-            raise HTTPException(status_code=403, detail="Insufficient permission")
-        return {"project_id": project_id, "tenant_id": tenant_id, "role": role}
+        return ensure_project_access(supabase, tenant_id, current_user["id"], project_id, required_permission)
+
+    return _get_project_access
+
+
+def get_project_access_query(required_permission: str):
+    """Like get_project_access but project_id from query (for list endpoints)."""
+
+    def _get_project_access(
+        project_id: str = Query(..., alias="project_id"),
+        tenant_id: str = Depends(get_tenant_id),
+        current_user: dict = Depends(get_current_user),
+        supabase: Client = Depends(get_supabase_client),
+    ) -> dict:
+        return ensure_project_access(supabase, tenant_id, current_user["id"], project_id, required_permission)
 
     return _get_project_access
