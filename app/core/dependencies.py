@@ -1,11 +1,12 @@
 from fastapi import Depends, Header, HTTPException, Query
+from fastapi import Depends, Header, HTTPException, Query
 from supabase import Client, create_client
 import logging
 
 
 from app.core.config import Settings, get_settings
 from app.core.constants import DB_SCHEMA
-from app.core.permissions import has_permission
+from app.core.permissions import has_permission, READ_PERMISSIONS
 
 
 def get_supabase_client(settings: Settings = Depends(get_settings)) -> Client:
@@ -112,6 +113,18 @@ def require_tenant_org_admin(
     return tenant_id
 
 
+def require_tenant_admin_or_demo(
+    tenant_id: str = Depends(get_tenant_id),
+    current_user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_client),
+) -> str:
+    """Allow org_admin OR demo users. Demo users get read-only data visibility."""
+    role = get_tenant_membership(tenant_id, current_user["id"], supabase)
+    if role not in ("org_admin", "demo"):
+        raise HTTPException(status_code=403, detail="Tenant org_admin required")
+    return tenant_id
+
+
 def _first_row(result) -> dict | None:
     """Normalize Supabase execute result: return first row dict or None."""
     if result is None or not getattr(result, "data", None):
@@ -141,6 +154,10 @@ def ensure_project_access(
     tenant_role = get_tenant_membership(tenant_id, user_id, supabase)
     if tenant_role == "org_admin":
         return {"project_id": project_id, "tenant_id": tenant_id, "role": "admin"}
+    if tenant_role == "demo":
+        if required_permission not in READ_PERMISSIONS:
+            raise HTTPException(status_code=403, detail="demo_mode")
+        return {"project_id": project_id, "tenant_id": tenant_id, "role": "viewer"}
     mem_result = (
         supabase.schema(DB_SCHEMA).table("project_members")
         .select("role")

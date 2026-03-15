@@ -3,9 +3,14 @@ from datetime import date, datetime, timezone
 from supabase import Client
 
 from app.core.constants import DONE_TASK_STATUS_NAMES
-from app.modules.attendance.service import list_attendance
-from app.modules.dashboard.schemas import DashboardSummaryResponse, ProjectSummaryItem
-from app.modules.expense.service import get_balance
+from app.modules.attendance.service import list_attendance, list_attendance_in_range
+from app.modules.dashboard.schemas import (
+    DashboardSummaryResponse,
+    PeriodProjectItem,
+    PeriodSummaryResponse,
+    ProjectSummaryItem,
+)
+from app.modules.expense.service import get_balance, list_transactions as list_expense_transactions
 from app.modules.projects.service import list_projects
 from app.modules.tasks.schemas import TaskResponse
 from app.modules.tasks.service import list_statuses, list_tasks
@@ -69,7 +74,8 @@ def get_dashboard_summary(
     total_wallet = 0.0
     total_tasks_count = 0
     total_due_count = 0
-    only_my_tasks = tenant_role != "org_admin"
+    # org_admin and demo see all tasks; regular members see only their own
+    only_my_tasks = tenant_role not in ("org_admin", "demo")
     for p in projects:
         balance = get_balance(supabase, p.id)
         tasks = list_tasks(supabase, p.id)
@@ -106,4 +112,42 @@ def get_dashboard_summary(
         total_wallet_balance=round(total_wallet, 2),
         total_tasks=total_tasks_count,
         total_due_tasks=total_due_count,
+    )
+
+
+def get_period_summary(
+    supabase: Client,
+    tenant_id: str,
+    user_id: str,
+    tenant_role: str | None,
+    from_date: str,
+    to_date: str,
+) -> PeriodSummaryResponse:
+    projects = list_projects(supabase, tenant_id, user_id, tenant_role=tenant_role)
+    items: list[PeriodProjectItem] = []
+    total_attendance = 0
+    total_credits = 0.0
+    total_debits = 0.0
+    for p in projects:
+        attendance_rows = list_attendance_in_range(supabase, p.id, from_date, to_date)
+        person_days = len(attendance_rows)
+        transactions = list_expense_transactions(supabase, p.id)
+        credits = 0.0
+        debits = 0.0
+        for t in transactions:
+            if not t.created_at:
+                continue
+            day = t.created_at[:10] if len(t.created_at) >= 10 else t.created_at
+            if from_date <= day <= to_date:
+                if t.type == "credit": credits += t.amount
+                else: debits += t.amount
+        items.append(PeriodProjectItem(
+            project_id=p.id, project_name=p.name, location=p.location or p.address,
+            attendance_person_days=person_days, spend_credits_in_range=round(credits, 2), spend_debits_in_range=round(debits, 2),
+        ))
+        total_attendance += person_days
+        total_credits += credits
+        total_debits += debits
+    return PeriodSummaryResponse(from_date=from_date, to_date=to_date, projects=items,
+        total_attendance_person_days=total_attendance, total_spend_credits=round(total_credits, 2), total_spend_debits=round(total_debits, 2),
     )

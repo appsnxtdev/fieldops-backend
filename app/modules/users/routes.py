@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 
-from app.core.dependencies import get_bearer_token, get_current_user, get_supabase_client, require_tenant_org_admin
+from app.core.dependencies import get_bearer_token, get_current_user, get_supabase_client, require_tenant_admin_or_demo, require_tenant_org_admin
 from app.core.tenants_client import get_core_user_me
 from app.modules.users.schemas import UserProfileResponse
 from app.modules.users.service import ensure_profile, get_me, get_profiles_by_ids
@@ -27,7 +27,7 @@ def me(
 @router.get("/profiles", response_model=list[UserProfileResponse])
 def list_profiles(
     user_ids: str = Query(..., description="Comma-separated user UUIDs"),
-    tenant_id: str = Depends(require_tenant_org_admin),
+    tenant_id: str = Depends(require_tenant_admin_or_demo),
     supabase: Client = Depends(get_supabase_client),
 ) -> list[UserProfileResponse]:
     ids = [x.strip() for x in user_ids.split(",") if x.strip()]

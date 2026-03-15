@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.dependencies import get_supabase_client, get_tenant_id, require_tenant_org_admin
+from app.core.dependencies import get_current_user, get_supabase_client, get_tenant_id, get_tenant_membership, require_tenant_admin_or_demo, require_tenant_org_admin
 from app.modules.tenant_members.schemas import TenantMemberCreate, TenantMemberResponse, TenantMemberUpdate
 from app.modules.tenant_members.service import add_member, list_members, remove_member, update_member
 from postgrest.exceptions import APIError
@@ -9,9 +9,19 @@ from supabase import Client
 router = APIRouter()
 
 
+@router.get("/me")
+def get_my_tenant_membership(
+    tenant_id: str = Depends(get_tenant_id),
+    current_user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_client),
+) -> dict:
+    role = get_tenant_membership(tenant_id, current_user["id"], supabase)
+    return {"role": role or "member"}
+
+
 @router.get("", response_model=list[TenantMemberResponse])
 def list_tenant_members(
-    tenant_id: str = Depends(require_tenant_org_admin),
+    tenant_id: str = Depends(require_tenant_admin_or_demo),
     supabase: Client = Depends(get_supabase_client),
 ):
     return list_members(supabase, tenant_id)

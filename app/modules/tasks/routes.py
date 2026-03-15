@@ -78,7 +78,7 @@ def list_tasks_route(
     supabase: Client = Depends(get_supabase_client),
 ):
     tasks = list_tasks(supabase, project_id)
-    if access.get("role") != "admin":
+    if access.get("role") == "member":
         tasks = [t for t in tasks if t.assignee_id == current_user["id"]]
     return tasks
 

@@ -1,9 +1,19 @@
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+import csv
+import io
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 
 from app.core.dependencies import get_current_user, get_project_access, get_supabase_client
 from app.core.permissions import CAN_LOG_ATTENDANCE, CAN_VIEW_ATTENDANCE
 from app.modules.attendance.schemas import AttendanceResponse
-from app.modules.attendance.service import check_in as do_check_in, check_out as do_check_out, list_attendance, upload_selfie
+from app.modules.attendance.service import (
+    check_in as do_check_in,
+    check_out as do_check_out,
+    list_attendance,
+    list_attendance_in_range,
+    upload_selfie,
+)
 from supabase import Client
 
 router = APIRouter()
@@ -61,3 +71,55 @@ def list_attendance_route(
     supabase: Client = Depends(get_supabase_client),
 ):
     return list_attendance(supabase, project_id, date)
+
+
+@router.get("/{project_id}/export")
+def export_attendance_route(
+    project_id: str,
+    from_date: str = Query(..., description="Start date YYYY-MM-DD"),
+    to_date: str = Query(..., description="End date YYYY-MM-DD"),
+    access: dict = Depends(get_project_access(CAN_VIEW_ATTENDANCE)),
+    supabase: Client = Depends(get_supabase_client),
+):
+    """Export attendance for a site as CSV (date range inclusive). Names and human-readable dates."""
+    from app.modules.users.service import get_profiles_by_ids
+
+    rows = list_attendance_in_range(supabase, project_id, from_date, to_date)
+    user_ids = list({r.get("user_id") for r in rows if r.get("user_id")})
+    profiles = get_profiles_by_ids(supabase, user_ids)
+    profile_map = {p.id: p for p in profiles}
+
+    def format_datetime(iso: str | None) -> str:
+        if not iso:
+            return ""
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            return dt.strftime("%d %b %Y, %I:%M %p")
+        except Exception:
+            return iso or ""
+
+    def member_name(uid: str | None) -> str:
+        if not uid:
+            return ""
+        p = profile_map.get(uid)
+        if p and (p.full_name or p.email):
+            return (p.full_name or p.email or "").strip()
+        return uid[:8] if uid else ""
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["date", "member_name", "check_in_at", "check_out_at"])
+    for r in rows:
+        w.writerow([
+            r.get("date") or "",
+            member_name(r.get("user_id")),
+            format_datetime(r.get("check_in_at")),
+            format_datetime(r.get("check_out_at")),
+        ])
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=attendance_{project_id}_{from_date}_{to_date}.csv"},
+    )

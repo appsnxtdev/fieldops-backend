@@ -7,9 +7,12 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = ""
     SUPABASE_SERVICE_ROLE_KEY: str = ""
     SUPABASE_ANON_KEY: str = ""
+    SUPABASE_URL: str = ""
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
+    SUPABASE_ANON_KEY: str = ""
     ENV: str = "development"
     DEBUG: bool = False
-    ALLOWED_ORIGINS: str = "*"
+    ALLOWED_ORIGINS: str = "https://api.appnxt.cloud,https://saas.appnxt.cloud,https://fieldops.appnxt.cloud"
     LOG_LEVEL: str = "INFO"
     CORE_SERVICE_URL: str = ""
     CORE_SERVICE_API_KEY: str = ""

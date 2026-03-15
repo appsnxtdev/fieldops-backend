@@ -43,8 +43,6 @@ def _project_ids_user_can_view(
     )
     tenant_role = _first_row(tenant_role_r)
     role = (tenant_role.get("role") if tenant_role else None) or "member"
-    if not has_permission(role, CAN_VIEW_MATERIALS):
-        return []
     if role == "org_admin":
         r = supabase.schema(DB_SCHEMA).table("projects").select("id, name").eq("tenant_id", tenant_id).in_("id", requested_ids or []).execute()
         return [(row["id"], row["name"]) for row in (r.data or [])]

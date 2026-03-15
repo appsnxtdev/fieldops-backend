@@ -1,13 +1,17 @@
+from typing import Literal
+
 from pydantic import BaseModel, EmailStr
+
+TenantRole = Literal["org_admin", "member", "viewer", "demo"]
 
 
 class TenantMemberCreate(BaseModel):
     email: EmailStr
-    role: str  # org_admin | member
+    role: TenantRole
 
 
 class TenantMemberUpdate(BaseModel):
-    role: str  # org_admin | member
+    role: TenantRole
 
 
 class TenantMemberResponse(BaseModel):

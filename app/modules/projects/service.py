@@ -10,8 +10,20 @@ from app.modules.projects.schemas import (
 )
 
 
-def list_projects(supabase: Client, tenant_id: str, user_id: str) -> list[ProjectResponse]:
-    """Return projects the user is assigned to (member of), within the tenant."""
+def list_projects(
+    supabase: Client, tenant_id: str, user_id: str, *, tenant_role: str | None = None
+) -> list[ProjectResponse]:
+    """Return projects for the user. If tenant_role is org_admin or demo, return all tenant projects; else projects user is a member of."""
+    if tenant_role in ("org_admin", "demo"):
+        r = (
+            supabase.schema(DB_SCHEMA)
+            .table("projects")
+            .select("*")
+            .eq("tenant_id", tenant_id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return [ProjectResponse(**row) for row in (r.data or [])]
     members_r = supabase.schema(DB_SCHEMA).table("project_members").select("project_id").eq("user_id", user_id).execute()
     project_ids = [row["project_id"] for row in (members_r.data or [])]
     if not project_ids:
