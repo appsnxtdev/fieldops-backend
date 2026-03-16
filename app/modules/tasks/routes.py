@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client
 from app.core.dependencies import get_current_user, get_project_access, get_supabase_client
 from app.core.permissions import CAN_MANAGE_TASK_STATUSES, CAN_MANAGE_TASKS, CAN_VIEW_PROJECT
 from app.modules.tasks.schemas import (
@@ -35,8 +36,15 @@ def list_statuses_route(
     project_id: str,
     access: dict = Depends(get_project_access(CAN_VIEW_PROJECT)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return list_statuses(supabase, project_id)
+    key = CacheKeys.task_statuses(project_id)
+    cached = cache_get(redis, key)
+    if cached is not None:
+        return cached
+    result = list_statuses(supabase, project_id)
+    cache_set(redis, key, [r.model_dump() for r in result], ttl=600)
+    return result
 
 
 @router.post("/{project_id}/statuses", response_model=TaskStatusResponse, status_code=201)
@@ -45,8 +53,11 @@ def create_status_route(
     payload: TaskStatusCreate,
     access: dict = Depends(get_project_access(CAN_MANAGE_TASK_STATUSES)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return create_status(supabase, project_id, payload)
+    result = create_status(supabase, project_id, payload)
+    cache_delete(redis, CacheKeys.task_statuses(project_id))
+    return result
 
 
 @router.patch("/{project_id}/statuses/{status_id}", response_model=TaskStatusResponse)
@@ -56,8 +67,11 @@ def update_status_route(
     payload: TaskStatusUpdate,
     access: dict = Depends(get_project_access(CAN_MANAGE_TASK_STATUSES)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return update_status(supabase, status_id, project_id, payload)
+    result = update_status(supabase, status_id, project_id, payload)
+    cache_delete(redis, CacheKeys.task_statuses(project_id))
+    return result
 
 
 @router.delete("/{project_id}/statuses/{status_id}", status_code=204)
@@ -66,8 +80,10 @@ def delete_status_route(
     status_id: str,
     access: dict = Depends(get_project_access(CAN_MANAGE_TASK_STATUSES)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     delete_status(supabase, status_id, project_id)
+    cache_delete(redis, CacheKeys.task_statuses(project_id))
 
 
 @router.get("/{project_id}/tasks", response_model=list[TaskResponse])
@@ -76,8 +92,16 @@ def list_tasks_route(
     access: dict = Depends(get_project_access(CAN_VIEW_PROJECT)),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    tasks = list_tasks(supabase, project_id)
+    key = CacheKeys.tasks(project_id)
+    cached = cache_get(redis, key)
+    if cached is not None:
+        tasks = [TaskResponse(**t) for t in cached]
+    else:
+        tasks = list_tasks(supabase, project_id)
+        cache_set(redis, key, [t.model_dump() for t in tasks], ttl=120)
+    # Member-role filter always applied after cache lookup (security: never cache filtered list)
     if access.get("role") == "member":
         tasks = [t for t in tasks if t.assignee_id == current_user["id"]]
     return tasks
@@ -103,8 +127,11 @@ def create_task_route(
     access: dict = Depends(get_project_access(CAN_MANAGE_TASKS)),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return create_task(supabase, project_id, current_user["id"], payload)
+    result = create_task(supabase, project_id, current_user["id"], payload)
+    cache_delete(redis, CacheKeys.tasks(project_id))
+    return result
 
 
 @router.patch("/{project_id}/tasks/{task_id}", response_model=TaskResponse)
@@ -114,8 +141,11 @@ def update_task_route(
     payload: TaskUpdate,
     access: dict = Depends(get_project_access(CAN_MANAGE_TASKS)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return update_task(supabase, task_id, project_id, payload)
+    result = update_task(supabase, task_id, project_id, payload)
+    cache_delete(redis, CacheKeys.tasks(project_id))
+    return result
 
 
 @router.delete("/{project_id}/tasks/{task_id}", status_code=204)
@@ -124,8 +154,10 @@ def delete_task_route(
     task_id: str,
     access: dict = Depends(get_project_access(CAN_MANAGE_TASKS)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     delete_task(supabase, task_id, project_id)
+    cache_delete(redis, CacheKeys.tasks(project_id))
 
 
 @router.get("/{project_id}/tasks/{task_id}/updates", response_model=list[TaskUpdateNoteResponse])

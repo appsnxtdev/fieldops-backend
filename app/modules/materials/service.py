@@ -36,11 +36,19 @@ def get_material_balance(supabase: Client, material_id: str) -> float:
 
 def list_materials_with_balance(supabase: Client, project_id: str) -> list[MaterialWithBalanceResponse]:
     materials = list_materials(supabase, project_id)
-    out = []
-    for m in materials:
-        balance = get_material_balance(supabase, m.id)
-        out.append(MaterialWithBalanceResponse(**(m.model_dump()), balance=balance))
-    return out
+    if not materials:
+        return []
+    material_ids = [m.id for m in materials]
+    ledger_r = supabase.schema(DB_SCHEMA).table("material_ledger").select("material_id, type, quantity").in_("material_id", material_ids).execute()
+    balances: dict[str, Decimal] = {}
+    for row in ledger_r.data or []:
+        mid = row["material_id"]
+        delta = Decimal(str(row["quantity"])) if row["type"] == "in" else -Decimal(str(row["quantity"]))
+        balances[mid] = balances.get(mid, Decimal("0")) + delta
+    return [
+        MaterialWithBalanceResponse(**(m.model_dump()), balance=float(balances.get(m.id, Decimal("0"))))
+        for m in materials
+    ]
 
 
 def create_material(

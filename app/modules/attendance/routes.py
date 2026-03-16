@@ -4,6 +4,7 @@ import io
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
+from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client
 from app.core.dependencies import get_current_user, get_project_access, get_supabase_client
 from app.core.permissions import CAN_LOG_ATTENDANCE, CAN_VIEW_ATTENDANCE
 from app.modules.attendance.schemas import AttendanceResponse
@@ -29,6 +30,7 @@ async def attendance_check_in(
     access: dict = Depends(get_project_access(CAN_LOG_ATTENDANCE)),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     user_id = current_user["id"]
     try:
@@ -36,9 +38,15 @@ async def attendance_check_in(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     try:
-        return do_check_in(supabase, project_id, user_id, date, lat, lng, path)
+        result = do_check_in(supabase, project_id, user_id, date, lat, lng, path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    cache_delete(
+        redis,
+        CacheKeys.attendance(project_id, date),
+        CacheKeys.dashboard(access["tenant_id"], user_id),
+    )
+    return result
 
 
 @router.post("/{project_id}/check-out", response_model=AttendanceResponse)
@@ -51,6 +59,7 @@ async def attendance_check_out(
     access: dict = Depends(get_project_access(CAN_LOG_ATTENDANCE)),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     user_id = current_user["id"]
     try:
@@ -58,9 +67,15 @@ async def attendance_check_out(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     try:
-        return do_check_out(supabase, project_id, user_id, date, lat, lng, path)
+        result = do_check_out(supabase, project_id, user_id, date, lat, lng, path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    cache_delete(
+        redis,
+        CacheKeys.attendance(project_id, date),
+        CacheKeys.dashboard(access["tenant_id"], user_id),
+    )
+    return result
 
 
 @router.get("/{project_id}", response_model=list[AttendanceResponse])
@@ -69,8 +84,15 @@ def list_attendance_route(
     date: str,
     access: dict = Depends(get_project_access(CAN_VIEW_ATTENDANCE)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return list_attendance(supabase, project_id, date)
+    key = CacheKeys.attendance(project_id, date)
+    cached = cache_get(redis, key)
+    if cached is not None:
+        return cached
+    result = list_attendance(supabase, project_id, date)
+    cache_set(redis, key, [r if isinstance(r, dict) else r.model_dump() for r in result], ttl=30)
+    return result
 
 
 @router.get("/{project_id}/export")

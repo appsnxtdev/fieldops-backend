@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
+from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client
 from app.core.constants import DB_SCHEMA
 from app.core.dependencies import (
     _first_row,
@@ -80,8 +81,15 @@ def list_materials_route(
     project_id: str,
     access: dict = Depends(get_project_access(CAN_VIEW_MATERIALS)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return list_materials_with_balance(supabase, project_id)
+    key = CacheKeys.materials(project_id)
+    cached = cache_get(redis, key)
+    if cached is not None:
+        return [MaterialWithBalanceResponse(**item) for item in cached]
+    result = list_materials_with_balance(supabase, project_id)
+    cache_set(redis, key, [item.model_dump() for item in result], ttl=120)
+    return result
 
 
 @router.post("/{project_id}/materials", response_model=MaterialResponse, status_code=201)
@@ -90,11 +98,14 @@ def create_material_route(
     payload: MaterialCreate,
     access: dict = Depends(get_project_access(CAN_MANAGE_MATERIALS)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     if not payload.master_material_id and (not payload.name or not payload.unit):
         raise HTTPException(status_code=400, detail="Provide master_material_id or both name and unit")
     try:
-        return create_material(supabase, project_id, payload, access["tenant_id"])
+        result = create_material(supabase, project_id, payload, access["tenant_id"])
+        cache_delete(redis, CacheKeys.materials(project_id))
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -106,9 +117,12 @@ def update_material_route(
     payload: MaterialUpdate,
     access: dict = Depends(get_project_access(CAN_MANAGE_MATERIALS)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     try:
-        return update_material(supabase, material_id, project_id, payload)
+        result = update_material(supabase, material_id, project_id, payload)
+        cache_delete(redis, CacheKeys.materials(project_id))
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -119,8 +133,10 @@ def delete_material_route(
     material_id: str,
     access: dict = Depends(get_project_access(CAN_MANAGE_MATERIALS)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     delete_material(supabase, material_id, project_id)
+    cache_delete(redis, CacheKeys.materials(project_id))
 
 
 @router.get("/{project_id}/materials/{material_id}/ledger", response_model=list[LedgerEntryResponse])
@@ -146,6 +162,7 @@ def add_ledger_entry_route(
     access: dict = Depends(get_project_access(CAN_MANAGE_MATERIALS)),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     if type_ not in ("in", "out"):
         raise HTTPException(status_code=400, detail="type must be 'in' or 'out'")
@@ -154,6 +171,8 @@ def add_ledger_entry_route(
     receipt_path = None
     if receipt and receipt.filename and type_ == "in":
         receipt_path = upload_ledger_receipt(supabase, project_id, material_id, receipt)
-    return add_ledger_entry(
+    result = add_ledger_entry(
         supabase, material_id, type_, quantity, notes, current_user["id"], receipt_path=receipt_path
     )
+    cache_delete(redis, CacheKeys.materials(project_id))
+    return result

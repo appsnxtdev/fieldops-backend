@@ -4,6 +4,7 @@ import io
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
+from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client
 from app.core.dependencies import get_current_user, get_project_access, get_supabase_client
 from app.core.permissions import CAN_MANAGE_EXPENSE, CAN_VIEW_EXPENSE
 from app.modules.expense.schemas import ExpenseCreditCreate, ExpenseTransactionResponse, WalletBalanceResponse
@@ -25,10 +26,17 @@ def get_wallet(
     project_id: str,
     access: dict = Depends(get_project_access(CAN_VIEW_EXPENSE)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
+    key = CacheKeys.expense(project_id)
+    cached = cache_get(redis, key)
+    if cached is not None:
+        return WalletBalanceResponse(**cached)
     balance = get_balance(supabase, project_id)
     transactions = list_transactions(supabase, project_id)
-    return WalletBalanceResponse(balance=balance, transactions=transactions)
+    result = WalletBalanceResponse(balance=balance, transactions=transactions)
+    cache_set(redis, key, result.model_dump(), ttl=30)
+    return result
 
 
 @router.get("/{project_id}/export")
@@ -39,7 +47,7 @@ def export_expense_route(
     access: dict = Depends(get_project_access(CAN_VIEW_EXPENSE)),
     supabase: Client = Depends(get_supabase_client),
 ):
-    """Export expense transactions for a site as CSV (created_at date range inclusive). Names and human-readable dates."""
+    """Export expense transactions for a site as CSV (created_at date range inclusive)."""
     from app.modules.users.service import get_profiles_by_ids
 
     transactions = list_transactions(supabase, project_id)
@@ -73,13 +81,7 @@ def export_expense_route(
     w = csv.writer(buf)
     w.writerow(["type", "amount", "notes", "date_time", "created_by_name"])
     for t in filtered:
-        w.writerow([
-            t.type,
-            t.amount,
-            t.notes or "",
-            format_datetime(t.created_at),
-            created_by_name(t.created_by),
-        ])
+        w.writerow([t.type, t.amount, t.notes or "", format_datetime(t.created_at), created_by_name(t.created_by)])
     buf.seek(0)
     return StreamingResponse(
         iter([buf.getvalue()]),
@@ -95,8 +97,15 @@ def create_credit(
     access: dict = Depends(get_project_access(CAN_MANAGE_EXPENSE)),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return add_credit(supabase, project_id, payload.amount, payload.notes, current_user["id"])
+    result = add_credit(supabase, project_id, payload.amount, payload.notes, current_user["id"])
+    cache_delete(
+        redis,
+        CacheKeys.expense(project_id),
+        CacheKeys.dashboard(access["tenant_id"], current_user["id"]),
+    )
+    return result
 
 
 @router.post("/{project_id}/debit", response_model=ExpenseTransactionResponse, status_code=201)
@@ -108,8 +117,15 @@ async def create_debit(
     access: dict = Depends(get_project_access(CAN_MANAGE_EXPENSE)),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     import uuid
     key = str(uuid.uuid4())
     path = upload_receipt(supabase, project_id, key, receipt)
-    return add_debit(supabase, project_id, amount, path, notes, current_user["id"])
+    result = add_debit(supabase, project_id, amount, path, notes, current_user["id"])
+    cache_delete(
+        redis,
+        CacheKeys.expense(project_id),
+        CacheKeys.dashboard(access["tenant_id"], current_user["id"]),
+    )
+    return result

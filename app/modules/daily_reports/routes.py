@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
+from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client
 from app.core.dependencies import get_current_user, get_project_access, get_project_access_query, get_supabase_client, get_tenant_id
 from app.core.permissions import CAN_MANAGE_DAILY_REPORTS, CAN_VIEW_DAILY_REPORTS
 from app.modules.daily_reports.schemas import (
@@ -33,9 +34,17 @@ def recent_dates_route(
     limit: int = Query(14, ge=1, le=30),
     access: dict = Depends(get_project_access_query(CAN_VIEW_DAILY_REPORTS)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     """Return report dates that have at least one report (most recent first), for default date in mobile."""
-    return list_recent_dates_with_reports(supabase, project_id, limit)
+    pid = access["project_id"]
+    key = CacheKeys.dr_recent_dates(pid)
+    cached = cache_get(redis, key)
+    if cached is not None:
+        return cached
+    result = list_recent_dates_with_reports(supabase, pid, limit)
+    cache_set(redis, key, result, ttl=30)
+    return result
 
 
 @router.get("/by-date-range", response_model=DailyReportsByDateRangeResponse)
@@ -57,10 +66,18 @@ def list_reports_route(
     report_date: str = Query(..., description="Report date YYYY-MM-DD"),
     access: dict = Depends(get_project_access_query(CAN_VIEW_DAILY_REPORTS)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     """List all daily reports for a project on a given date (office view)."""
-    rows = list_reports_for_project_date(supabase, project_id, report_date)
-    return [DailyReportListResponse(**r) for r in rows]
+    pid = access["project_id"]
+    key = CacheKeys.dr_list(pid, report_date)
+    cached = cache_get(redis, key)
+    if cached is not None:
+        return [DailyReportListResponse(**r) for r in cached]
+    rows = list_reports_for_project_date(supabase, pid, report_date)
+    result = [DailyReportListResponse(**r) for r in rows]
+    cache_set(redis, key, [r.model_dump() for r in result], ttl=30)
+    return result
 
 
 @router.get("/reports/{report_id}/entries", response_model=list[DailyReportEntryResponse])
@@ -104,11 +121,27 @@ def list_report_entries(
     access: dict = Depends(get_project_access(CAN_VIEW_DAILY_REPORTS)),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    if access.get("role") == "admin":
-        return list_all_entries_for_project_date(supabase, project_id, report_date)
-    report = get_or_create_report(supabase, project_id, current_user["id"], report_date)
-    return list_entries(supabase, report["id"])
+    role = access.get("role")
+    if role == "admin":
+        key = CacheKeys.dr_entries_all(project_id, report_date)
+        cached = cache_get(redis, key)
+        if cached is not None:
+            return [DailyReportEntryResponse(**e) for e in cached]
+        result = list_all_entries_for_project_date(supabase, project_id, report_date)
+        cache_set(redis, key, [e.model_dump() if hasattr(e, "model_dump") else e for e in result], ttl=30)
+        return result
+    else:
+        uid = current_user["id"]
+        key = CacheKeys.dr_entries_member(project_id, uid, report_date)
+        cached = cache_get(redis, key)
+        if cached is not None:
+            return [DailyReportEntryResponse(**e) for e in cached]
+        report = get_or_create_report(supabase, project_id, uid, report_date)
+        result = list_entries(supabase, report["id"])
+        cache_set(redis, key, [e.model_dump() if hasattr(e, "model_dump") else e for e in result], ttl=30)
+        return result
 
 
 @router.post("/{project_id}/entries", response_model=DailyReportEntryResponse, status_code=201)
@@ -118,9 +151,17 @@ def add_report_entry(
     access: dict = Depends(get_project_access(CAN_MANAGE_DAILY_REPORTS)),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     report = get_or_create_report(supabase, project_id, current_user["id"], payload.report_date)
-    return append_entry(supabase, report["id"], payload.type, payload.content, payload.sort_order)
+    result = append_entry(supabase, report["id"], payload.type, payload.content, payload.sort_order)
+    cache_delete(
+        redis,
+        CacheKeys.dr_recent_dates(project_id),
+        CacheKeys.dr_list(project_id, payload.report_date),
+        CacheKeys.dr_entries_all(project_id, payload.report_date),
+    )
+    return result
 
 
 @router.post("/{project_id}/entries/photo", response_model=DailyReportEntryResponse, status_code=201)
@@ -132,8 +173,17 @@ async def add_report_photo(
     access: dict = Depends(get_project_access(CAN_MANAGE_DAILY_REPORTS)),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     report = get_or_create_report(supabase, project_id, current_user["id"], report_date)
     count = len(list_entries(supabase, report["id"]))
     path = upload_photo(supabase, project_id, current_user["id"], report_date, count, photo)
-    return append_entry(supabase, report["id"], "photo", path, sort_order)
+    result = append_entry(supabase, report["id"], "photo", path, sort_order)
+    # Use report_date from Form field — NOT datetime.utcnow()
+    cache_delete(
+        redis,
+        CacheKeys.dr_recent_dates(project_id),
+        CacheKeys.dr_list(project_id, report_date),
+        CacheKeys.dr_entries_all(project_id, report_date),
+    )
+    return result

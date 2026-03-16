@@ -1,12 +1,15 @@
-from fastapi import Depends, Header, HTTPException, Query
-from fastapi import Depends, Header, HTTPException, Query
-from supabase import Client, create_client
+import hashlib
 import logging
 
+from fastapi import Depends, Header, HTTPException, Query
+from supabase import Client, create_client
 
+from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client, token_hash
 from app.core.config import Settings, get_settings
 from app.core.constants import DB_SCHEMA
-from app.core.permissions import has_permission, READ_PERMISSIONS
+from app.core.permissions import READ_PERMISSIONS, has_permission
+
+logger = logging.getLogger(__name__)
 
 
 def get_supabase_client(settings: Settings = Depends(get_settings)) -> Client:
@@ -18,27 +21,36 @@ def get_supabase_client(settings: Settings = Depends(get_settings)) -> Client:
 def get_bearer_token(authorization: str | None = Header(None, alias="Authorization")) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
-    token = authorization.removeprefix("Bearer ").strip()
-    if not token:
+    t = authorization.removeprefix("Bearer ").strip()
+    if not t:
         raise HTTPException(status_code=401, detail="Missing token")
-    return token
+    return t
 
 
 def get_current_user(
     token: str = Depends(get_bearer_token),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ) -> dict:
+    key = CacheKeys.auth_user(token_hash(token))
+    cached = cache_get(redis, key)
+    if cached is not None:
+        return cached
     try:
         response = supabase.auth.get_user(token)
         if not response or not response.user:
             raise HTTPException(status_code=401, detail="Invalid token")
         u = response.user
-        return {
+        user_dict = {
             "id": u.id,
             "email": getattr(u, "email", None),
             "raw_user_metadata": getattr(u, "user_metadata") or {},
             "app_metadata": getattr(u, "app_metadata") or {},
         }
+        cache_set(redis, key, user_dict, ttl=300)
+        return user_dict
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -73,8 +85,14 @@ def _ensure_first_tenant_admin(
 def get_tenant_membership(
     tenant_id: str,
     user_id: str,
-    supabase: Client = Depends(get_supabase_client),
+    supabase: Client,
+    redis=None,
 ) -> str | None:
+    key = CacheKeys.tenant_member(tenant_id, user_id)
+    cached = cache_get(redis, key)
+    if cached is not None:
+        return cached
+
     r = (
         supabase.schema(DB_SCHEMA).table("tenant_members")
         .select("role")
@@ -85,7 +103,11 @@ def get_tenant_membership(
     )
     if r and r.data:
         row = r.data[0] if isinstance(r.data, list) and r.data else r.data
-        return row.get("role") if isinstance(row, dict) else None
+        role = row.get("role") if isinstance(row, dict) else None
+        if role:
+            cache_set(redis, key, role, ttl=300)
+        return role
+
     _ensure_first_tenant_admin(tenant_id, user_id, supabase)
     r2 = (
         supabase.schema(DB_SCHEMA).table("tenant_members")
@@ -97,7 +119,10 @@ def get_tenant_membership(
     )
     if r2 and r2.data:
         row = r2.data[0] if isinstance(r2.data, list) and r2.data else r2.data
-        return row.get("role") if isinstance(row, dict) else None
+        role = row.get("role") if isinstance(row, dict) else None
+        if role:
+            cache_set(redis, key, role, ttl=300)
+        return role
     return None
 
 
@@ -105,9 +130,10 @@ def require_tenant_org_admin(
     tenant_id: str = Depends(get_tenant_id),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ) -> str:
     logging.info(f"Checking tenant org_admin for user {current_user['id']} in tenant {tenant_id}")
-    role = get_tenant_membership(tenant_id, current_user["id"], supabase)
+    role = get_tenant_membership(tenant_id, current_user["id"], supabase, redis=redis)
     if role != "org_admin":
         raise HTTPException(status_code=403, detail="Tenant org_admin required")
     return tenant_id
@@ -117,9 +143,10 @@ def require_tenant_admin_or_demo(
     tenant_id: str = Depends(get_tenant_id),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ) -> str:
     """Allow org_admin OR demo users. Demo users get read-only data visibility."""
-    role = get_tenant_membership(tenant_id, current_user["id"], supabase)
+    role = get_tenant_membership(tenant_id, current_user["id"], supabase, redis=redis)
     if role not in ("org_admin", "demo"):
         raise HTTPException(status_code=403, detail="Tenant org_admin required")
     return tenant_id
@@ -136,7 +163,7 @@ def _first_row(result) -> dict | None:
 
 
 def ensure_project_access(
-    supabase: Client, tenant_id: str, user_id: str, project_id: str, required_permission: str
+    supabase: Client, tenant_id: str, user_id: str, project_id: str, required_permission: str, redis=None
 ) -> dict:
     """Validate user has access to project and required permission. Returns access dict or raises HTTPException."""
     proj_result = (
@@ -151,7 +178,7 @@ def ensure_project_access(
         raise HTTPException(status_code=404, detail="Project not found")
     if str(proj.get("tenant_id")) != str(tenant_id):
         raise HTTPException(status_code=403, detail="Project not in your tenant")
-    tenant_role = get_tenant_membership(tenant_id, user_id, supabase)
+    tenant_role = get_tenant_membership(tenant_id, user_id, supabase, redis=redis)
     if tenant_role == "org_admin":
         return {"project_id": project_id, "tenant_id": tenant_id, "role": "admin"}
     if tenant_role == "demo":
@@ -176,15 +203,16 @@ def ensure_project_access(
 
 
 def get_project_access(required_permission: str):
-    """Dependency factory: ensure user has access to project and required permission. Org admins have access to all projects in their tenant."""
+    """Dependency factory: ensure user has access to project and required permission."""
 
     def _get_project_access(
         project_id: str,
         tenant_id: str = Depends(get_tenant_id),
         current_user: dict = Depends(get_current_user),
         supabase: Client = Depends(get_supabase_client),
+        redis=Depends(get_redis_client),
     ) -> dict:
-        return ensure_project_access(supabase, tenant_id, current_user["id"], project_id, required_permission)
+        return ensure_project_access(supabase, tenant_id, current_user["id"], project_id, required_permission, redis=redis)
 
     return _get_project_access
 
@@ -197,7 +225,8 @@ def get_project_access_query(required_permission: str):
         tenant_id: str = Depends(get_tenant_id),
         current_user: dict = Depends(get_current_user),
         supabase: Client = Depends(get_supabase_client),
+        redis=Depends(get_redis_client),
     ) -> dict:
-        return ensure_project_access(supabase, tenant_id, current_user["id"], project_id, required_permission)
+        return ensure_project_access(supabase, tenant_id, current_user["id"], project_id, required_permission, redis=redis)
 
     return _get_project_access

@@ -1,6 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.dependencies import get_current_user, get_project_access, get_supabase_client, get_tenant_id, require_tenant_org_admin
+from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client
+from app.core.dependencies import (
+    get_current_user,
+    get_project_access,
+    get_supabase_client,
+    get_tenant_id,
+    get_tenant_membership,
+    require_tenant_org_admin,
+)
 from app.core.permissions import CAN_MANAGE_MEMBERS, CAN_MANAGE_PROJECT, CAN_VIEW_PROJECT
 from app.modules.projects.schemas import (
     ProjectCreate,
@@ -32,8 +40,16 @@ def list_my_projects(
     tenant_id: str = Depends(get_tenant_id),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return list_projects(supabase, tenant_id, current_user["id"])
+    role = get_tenant_membership(tenant_id, current_user["id"], supabase, redis=redis)
+    key = CacheKeys.projects_admin(tenant_id) if role == "org_admin" else CacheKeys.projects_member(tenant_id, current_user["id"])
+    cached = cache_get(redis, key)
+    if cached is not None:
+        return cached
+    result = list_projects(supabase, tenant_id, current_user["id"], tenant_role=role)
+    cache_set(redis, key, [r.model_dump() for r in result], ttl=120)
+    return result
 
 
 @router.post("", response_model=ProjectResponse, status_code=201)
@@ -42,8 +58,11 @@ def create_project_route(
     tenant_id: str = Depends(require_tenant_org_admin),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return create_project(supabase, tenant_id, payload, current_user["id"])
+    result = create_project(supabase, tenant_id, payload, current_user["id"])
+    cache_delete(redis, CacheKeys.projects_admin(tenant_id))
+    return result
 
 
 @router.get("/{project_id}/my-access", response_model=ProjectMyAccessResponse)
@@ -72,8 +91,11 @@ def update_project_route(
     payload: ProjectUpdate,
     access: dict = Depends(get_project_access(CAN_MANAGE_PROJECT)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return update_project(supabase, project_id, access["tenant_id"], payload)
+    result = update_project(supabase, project_id, access["tenant_id"], payload)
+    cache_delete(redis, CacheKeys.projects_admin(access["tenant_id"]))
+    return result
 
 
 @router.put("/{project_id}", response_model=ProjectResponse)
@@ -82,8 +104,11 @@ def put_project_route(
     payload: ProjectUpdate,
     access: dict = Depends(get_project_access(CAN_MANAGE_PROJECT)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return update_project(supabase, project_id, access["tenant_id"], payload, full_replace=True)
+    result = update_project(supabase, project_id, access["tenant_id"], payload, full_replace=True)
+    cache_delete(redis, CacheKeys.projects_admin(access["tenant_id"]))
+    return result
 
 
 @router.delete("/{project_id}", status_code=204)
@@ -91,11 +116,12 @@ def delete_project_route(
     project_id: str,
     access: dict = Depends(get_project_access(CAN_MANAGE_PROJECT)),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     delete_project(supabase, project_id, access["tenant_id"])
+    cache_delete(redis, CacheKeys.projects_admin(access["tenant_id"]))
 
 
-# Project members (nested under projects)
 @router.get("/{project_id}/members", response_model=list[ProjectMemberResponse])
 def list_members_route(
     project_id: str,
