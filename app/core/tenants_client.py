@@ -40,3 +40,17 @@ def get_core_user_me(token: str, settings: Settings | None = None) -> dict | Non
     except Exception:
         pass
     return None
+
+
+def get_core_user_role(token: str, settings: Settings | None = None) -> str | None:
+    """Returns the user's role string from core_service (e.g. 'admin'), or None if unavailable."""
+    user = get_core_user_me(token, settings=settings)
+    if not user:
+        return None
+    # Check role at top level, then inside app_metadata/metadata for flexibility
+    role = (
+        user.get("role")
+        or (user.get("app_metadata") or {}).get("role")
+        or (user.get("metadata") or {}).get("role")
+    )
+    return str(role).lower() if role else None

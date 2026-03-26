@@ -8,6 +8,7 @@ from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_re
 from app.core.config import Settings, get_settings
 from app.core.constants import DB_SCHEMA
 from app.core.permissions import READ_PERMISSIONS, has_permission
+from app.core.tenants_client import get_core_user_role
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +64,18 @@ def get_tenant_id(current_user: dict = Depends(get_current_user)) -> str:
 
 
 def _ensure_first_tenant_admin(
-    tenant_id: str, user_id: str, supabase: Client
+    tenant_id: str,
+    user_id: str,
+    supabase: Client,
+    token: str | None = None,
+    settings: Settings | None = None,
 ) -> None:
-    """If tenant has no members, insert this user as org_admin (bootstrap / secret zero)."""
+    """Bootstrap the first org_admin for a new tenant.
+
+    Validates the user's role in core_service before granting org_admin.
+    If the tenant already has members this is a no-op.
+    Raises 403 if the user is not an admin in core_service.
+    """
     existing = (
         supabase.schema(DB_SCHEMA).table("tenant_members")
         .select("user_id")
@@ -73,13 +83,26 @@ def _ensure_first_tenant_admin(
         .limit(1)
         .execute()
     )
-    if not existing.data or len(existing.data) == 0:
-        try:
-            supabase.schema(DB_SCHEMA).table("tenant_members").insert(
-                {"tenant_id": tenant_id, "user_id": user_id, "role": "org_admin"}
-            ).execute()
-        except Exception:
-            pass  # race: another request inserted; re-query will return role
+    if existing.data and len(existing.data) > 0:
+        return  # tenant already has members — nothing to bootstrap
+
+    # New tenant: validate the user is an admin in core_service before creating org_admin
+    core_role = get_core_user_role(token, settings=settings) if token else None
+    if core_role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "The organisation is not created yet, ask your admin to login once "
+                "and then add you to the projects"
+            ),
+        )
+
+    try:
+        supabase.schema(DB_SCHEMA).table("tenant_members").insert(
+            {"tenant_id": tenant_id, "user_id": user_id, "role": "org_admin"}
+        ).execute()
+    except Exception:
+        pass  # race condition: another request inserted first; re-query will return the role
 
 
 def get_tenant_membership(
@@ -87,6 +110,8 @@ def get_tenant_membership(
     user_id: str,
     supabase: Client,
     redis=None,
+    token: str | None = None,
+    settings: Settings | None = None,
 ) -> str | None:
     key = CacheKeys.tenant_member(tenant_id, user_id)
     cached = cache_get(redis, key)
@@ -108,7 +133,10 @@ def get_tenant_membership(
             cache_set(redis, key, role, ttl=300)
         return role
 
-    _ensure_first_tenant_admin(tenant_id, user_id, supabase)
+    # No membership record found — attempt bootstrap for new tenants.
+    # _ensure_first_tenant_admin raises 403 if the tenant already exists with members
+    # or if the user is not a core_service admin.
+    _ensure_first_tenant_admin(tenant_id, user_id, supabase, token=token, settings=settings)
     r2 = (
         supabase.schema(DB_SCHEMA).table("tenant_members")
         .select("role")
@@ -131,9 +159,11 @@ def require_tenant_org_admin(
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
     redis=Depends(get_redis_client),
+    token: str = Depends(get_bearer_token),
+    settings: Settings = Depends(get_settings),
 ) -> str:
     logging.info(f"Checking tenant org_admin for user {current_user['id']} in tenant {tenant_id}")
-    role = get_tenant_membership(tenant_id, current_user["id"], supabase, redis=redis)
+    role = get_tenant_membership(tenant_id, current_user["id"], supabase, redis=redis, token=token, settings=settings)
     if role != "org_admin":
         raise HTTPException(status_code=403, detail="Tenant org_admin required")
     return tenant_id
@@ -144,9 +174,11 @@ def require_tenant_admin_or_demo(
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
     redis=Depends(get_redis_client),
+    token: str = Depends(get_bearer_token),
+    settings: Settings = Depends(get_settings),
 ) -> str:
     """Allow org_admin OR demo users. Demo users get read-only data visibility."""
-    role = get_tenant_membership(tenant_id, current_user["id"], supabase, redis=redis)
+    role = get_tenant_membership(tenant_id, current_user["id"], supabase, redis=redis, token=token, settings=settings)
     if role not in ("org_admin", "demo"):
         raise HTTPException(status_code=403, detail="Tenant org_admin required")
     return tenant_id
@@ -163,7 +195,8 @@ def _first_row(result) -> dict | None:
 
 
 def ensure_project_access(
-    supabase: Client, tenant_id: str, user_id: str, project_id: str, required_permission: str, redis=None
+    supabase: Client, tenant_id: str, user_id: str, project_id: str, required_permission: str,
+    redis=None, token: str | None = None, settings: Settings | None = None,
 ) -> dict:
     """Validate user has access to project and required permission. Returns access dict or raises HTTPException."""
     proj_result = (
@@ -178,7 +211,7 @@ def ensure_project_access(
         raise HTTPException(status_code=404, detail="Project not found")
     if str(proj.get("tenant_id")) != str(tenant_id):
         raise HTTPException(status_code=403, detail="Project not in your tenant")
-    tenant_role = get_tenant_membership(tenant_id, user_id, supabase, redis=redis)
+    tenant_role = get_tenant_membership(tenant_id, user_id, supabase, redis=redis, token=token, settings=settings)
     if tenant_role == "org_admin":
         return {"project_id": project_id, "tenant_id": tenant_id, "role": "admin"}
     if tenant_role == "demo":
@@ -211,8 +244,13 @@ def get_project_access(required_permission: str):
         current_user: dict = Depends(get_current_user),
         supabase: Client = Depends(get_supabase_client),
         redis=Depends(get_redis_client),
+        token: str = Depends(get_bearer_token),
+        settings: Settings = Depends(get_settings),
     ) -> dict:
-        return ensure_project_access(supabase, tenant_id, current_user["id"], project_id, required_permission, redis=redis)
+        return ensure_project_access(
+            supabase, tenant_id, current_user["id"], project_id, required_permission,
+            redis=redis, token=token, settings=settings,
+        )
 
     return _get_project_access
 
@@ -226,7 +264,12 @@ def get_project_access_query(required_permission: str):
         current_user: dict = Depends(get_current_user),
         supabase: Client = Depends(get_supabase_client),
         redis=Depends(get_redis_client),
+        token: str = Depends(get_bearer_token),
+        settings: Settings = Depends(get_settings),
     ) -> dict:
-        return ensure_project_access(supabase, tenant_id, current_user["id"], project_id, required_permission, redis=redis)
+        return ensure_project_access(
+            supabase, tenant_id, current_user["id"], project_id, required_permission,
+            redis=redis, token=token, settings=settings,
+        )
 
     return _get_project_access

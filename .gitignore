@@ -26,6 +26,7 @@ htmlcov/
 *.egg-info/
 dist/
 build/
+docs/
 
 # IDE
 .idea/
