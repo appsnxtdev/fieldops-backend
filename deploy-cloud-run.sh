@@ -21,7 +21,7 @@ gcloud run deploy ${SERVICE_NAME} \
   --timeout 300 \
   --max-instances 10 \
   --min-instances 0 \
-  --set-env-vars="ENVIRONMENT=production,SUPABASE_URL=https://inakqzvnfevykqkcotvb.supabase.co,CORE_SERVICE_URL=https://api.appnxt.cloud,UPSTASH_REDIS_REST_URL=https://perfect-cowbird-74094.upstash.io" \
+  --set-env-vars="ENVIRONMENT=production,SUPABASE_URL=https://inakqzvnfevykqkcotvb.supabase.co,CORE_SERVICE_URL=https://api.appnxt.cloud,UPSTASH_REDIS_REST_URL=https://perfect-cowbird-74094.upstash.io,ALLOWED_ORIGINS=https://fieldops.appsnxt.cloud,https://saas.appsnxt.cloud" \
   --set-secrets="SUPABASE_DB_PASSWORD=supabase-db-password:latest,SUPABASE_SERVICE_ROLE_KEY=supabase-service-role-key:latest,SUPABASE_JWT_SECRET=supabase-jwt-secret:latest,UPSTASH_REDIS_REST_TOKEN=upstash-redis-rest-token:latest"
 
 echo "Deployment complete!"
