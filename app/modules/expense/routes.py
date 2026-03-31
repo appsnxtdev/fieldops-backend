@@ -4,7 +4,7 @@ import io
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
-from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client
+from app.core.cache import DEMO_CACHE_TTL, CacheKeys, cache_delete, cache_get, cache_set, get_redis_client, is_demo_user
 from app.core.dependencies import get_current_user, get_project_access, get_supabase_client
 from app.core.permissions import CAN_MANAGE_EXPENSE, CAN_VIEW_EXPENSE
 from app.modules.expense.schemas import ExpenseCreditCreate, ExpenseTransactionResponse, WalletBalanceResponse
@@ -28,14 +28,25 @@ def get_wallet(
     supabase: Client = Depends(get_supabase_client),
     redis=Depends(get_redis_client),
 ):
-    key = CacheKeys.expense(project_id)
+    # Check if demo user for persistent caching
+    tenant_role = access.get("tenant_role")
+    is_demo = is_demo_user(tenant_role)
+
+    if is_demo:
+        key = CacheKeys.demo_expense(project_id)
+        ttl = DEMO_CACHE_TTL
+    else:
+        key = CacheKeys.expense(project_id)
+        ttl = 30
+
     cached = cache_get(redis, key)
     if cached is not None:
         return WalletBalanceResponse(**cached)
+
     balance = get_balance(supabase, project_id)
     transactions = list_transactions(supabase, project_id)
     result = WalletBalanceResponse(balance=balance, transactions=transactions)
-    cache_set(redis, key, result.model_dump(), ttl=30)
+    cache_set(redis, key, result.model_dump(), ttl=ttl)
     return result
 
 

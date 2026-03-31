@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Seed demo data for FieldOps: one tenant, one owner, N sites, 3 supervisors per site,
-with attendance, tasks, daily reports, expense, and materials. Uses Supabase Auth + fieldops schema.
-Run with: SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... python scripts/seed_demo_data.py
-Optional: SEED_DRY_RUN=1 (no writes), SEED_CLEANUP=1 (delete seed data), SEED_N_SITES=3, SEED_DAYS_ATTENDANCE=14, SEED_DAYS_REPORTS=7.
+Seed demo data for FieldOps: one tenant, N sites, 3 supervisors per site,
+with attendance, tasks, daily reports, expense, materials, and labour.
+Does NOT create Auth users; use --print-accounts to see required accounts, create them manually,
+then run with SEED_OWNER_ID and SEED_SUPERVISOR_IDS.
+
+Run: SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... python scripts/seed_demo_data.py
+Env: SEED_TENANT_ID (optional), SEED_OWNER_ID (required), SEED_SUPERVISOR_IDS=id1,id2,... (3 per site)
+Optional: SEED_DRY_RUN=1, SEED_CLEANUP=1, SEED_N_SITES=3, SEED_DAYS_ATTENDANCE=14, SEED_DAYS_REPORTS=7, SEED_DAYS_LABOUR=14.
 """
 from __future__ import annotations
 
@@ -27,11 +31,17 @@ except ImportError:
     pass
 
 DB_SCHEMA = "fieldops"
-DEMO_EMAIL_DOMAIN = "fieldops-demo.local"
-DEFAULT_PASSWORD = "DemoPassword123!"
+DEMO_EMAIL_DOMAIN = "fieldops.demo"
 MATERIAL_UNITS = ("kg", "L", "pieces", "m", "m²", "bags", "tonnes", "cubic m", "boxes", "rolls")
 
+
+def name_to_email(full_name: str) -> str:
+    """e.g. 'Ramesh Kumar' -> ramesh.kumar@fieldops.demo"""
+    local = full_name.lower().replace(" ", ".")
+    return f"{local}@{DEMO_EMAIL_DOMAIN}"
+
 # Realistic Indian names for owner and supervisors
+TENANT_NAME = "FieldOps Demo"
 OWNER_NAME = "Ramesh Kumar"
 SUPERVISOR_NAMES = [
     "Arun Singh", "Priya Sharma", "Vikram Patel",
@@ -86,6 +96,16 @@ MASTER_MATERIALS = [
     ("Tiles", "pieces"),
 ]
 
+LABOUR_TYPES = [
+    ("Mason", 800),
+    ("Helper", 500),
+    ("Carpenter", 850),
+    ("Bar Bender", 750),
+    ("Painter", 700),
+    ("Electrician", 900),
+    ("Plumber", 850),
+]
+
 
 def get_env(name: str, default: str | None = None) -> str:
     v = os.environ.get(name)
@@ -104,37 +124,36 @@ def create_supabase_client():
     return create_client(url, key)
 
 
-def create_auth_user(supabase, email: str, password: str, full_name: str, tenant_id: str, *, dry_run: bool):
-    if dry_run:
-        return str(uuid4())
-    admin = getattr(supabase.auth, "admin", None)
-    if not admin:
-        raise RuntimeError("Supabase auth.admin not available (need service role key)")
-    # create_user typically: email, password, email_confirm=True, app_metadata={}
-    try:
-        result = admin.create_user(
-            dict(
-                email=email,
-                password=password,
-                email_confirm=True,
-                app_metadata={"tenant_id": str(tenant_id)},
-                user_metadata={"full_name": full_name},
-            )
-        )
-    except TypeError:
-        result = admin.create_user(
-            email=email,
-            password=password,
-            email_confirm=True,
-            app_metadata={"tenant_id": str(tenant_id)},
-            user_metadata={"full_name": full_name},
-        )
-    user = result.user if hasattr(result, "user") else (result if not hasattr(result, "data") else getattr(result, "data", result))
-    if hasattr(user, "id"):
-        return str(user.id)
-    if isinstance(user, dict):
-        return str(user.get("id", ""))
-    raise RuntimeError("create_user did not return user id")
+def get_required_user_ids(n_sites: int):
+    """Get owner_id and list of supervisor ids from env. 3 supervisors per site."""
+    owner_id = os.environ.get("SEED_OWNER_ID", "").strip()
+    raw = os.environ.get("SEED_SUPERVISOR_IDS", "").strip()
+    ids = [x.strip() for x in raw.split(",") if x.strip()]
+    required = 3 * n_sites
+    if len(ids) != required:
+        log.error("SEED_SUPERVISOR_IDS must have exactly %d comma-separated UUIDs (3 per site), got %d", required, len(ids))
+        sys.exit(1)
+    if not owner_id:
+        log.error("SEED_OWNER_ID is required")
+        sys.exit(1)
+    return owner_id, ids
+
+
+def print_required_accounts(n_sites: int):
+    """Print tenant name, owner/supervisor names, and user data for core service input."""
+    n_sup = 3 * n_sites
+    log.info("--- Tenant & user data for core service ---")
+    log.info("TENANT_NAME: %s", TENANT_NAME)
+    log.info("OWNER_NAME:  %s", OWNER_NAME)
+    log.info("SUPERVISOR_NAMES: %s", SUPERVISOR_NAMES[:n_sup])
+    log.info("")
+    log.info("User data to create (1 owner in your tenant, then 9 supervisors in that tenant):")
+    log.info("  Owner:   email=%s  full_name=%s  role=org_admin", name_to_email(OWNER_NAME), OWNER_NAME)
+    for i in range(n_sup):
+        name = SUPERVISOR_NAMES[i]
+        log.info("  Super %d: email=%s  full_name=%s  role=member", i + 1, name_to_email(name), name)
+    log.info("")
+    log.info("After creation, run seed with SEED_TENANT_ID=<tenant_uuid> SEED_OWNER_ID=<owner_uuid> SEED_SUPERVISOR_IDS=<id1>,...,<id9>")
 
 
 def seed(
@@ -144,42 +163,41 @@ def seed(
     n_sites: int = 3,
     days_attendance: int = 14,
     days_reports: int = 7,
+    days_labour: int = 14,
 ):
     if cleanup and not dry_run:
         return run_cleanup(create_supabase_client())
     if dry_run:
-        _dry_run_print(n_sites, days_attendance, days_reports)
+        _dry_run_print(n_sites, days_attendance, days_reports, days_labour)
         return
 
+    owner_id, supervisor_ids = get_required_user_ids(n_sites)
+    tenant_id = os.environ.get("SEED_TENANT_ID", "").strip() or str(uuid4())
     supabase = create_supabase_client()
-    tenant_id = str(uuid4())
-    owner_email = f"owner@{DEMO_EMAIL_DOMAIN}"
-    password = get_env("SEED_PASSWORD", DEFAULT_PASSWORD)
-
-    # 1) Create owner + supervisors in Auth and fieldops
-    log.info("Tenant: %s", tenant_id)
-    owner_id = create_auth_user(supabase, owner_email, password, OWNER_NAME, tenant_id, dry_run=False)
-    log.info("  Auth user: %s (%s)", owner_email, OWNER_NAME)
     tbl = supabase.schema(DB_SCHEMA).table
-    tbl("profiles").insert({"id": owner_id, "email": owner_email, "full_name": OWNER_NAME}).execute()
-    log.info("  Profile: %s", owner_email)
-    tbl("tenant_members").insert({"tenant_id": tenant_id, "user_id": owner_id, "role": "org_admin"}).execute()
-    log.info("  Tenant member: %s (org_admin)", owner_email)
 
+    owner_email = name_to_email(OWNER_NAME)
+    # Build supervisor list: same order as SEED_SUPERVISOR_IDS (site0-0,1,2, site1-0,1,2, ...)
     supervisors = []
     for site_idx in range(n_sites):
         for k in range(3):
             idx = site_idx * 3 + k
+            uid = supervisor_ids[idx]
             name = SUPERVISOR_NAMES[idx % len(SUPERVISOR_NAMES)]
-            email = f"supervisor-{site_idx}-{k+1}@{DEMO_EMAIL_DOMAIN}"
-            uid = create_auth_user(supabase, email, password, name, tenant_id, dry_run=False)
-            log.info("  Auth user: %s (%s)", email, name)
-            tbl("profiles").insert({"id": uid, "email": email, "full_name": name}).execute()
-            log.info("  Profile: %s", email)
-            tbl("tenant_members").insert({"tenant_id": tenant_id, "user_id": uid, "role": "member"}).execute()
-            log.info("  Tenant member: %s (member)", email)
+            email = name_to_email(name)
             supervisors.append({"id": uid, "email": email, "full_name": name})
-    all_supervisor_ids = [s["id"] for s in supervisors]
+
+    # 1) Profiles and tenant_members (no Auth creation)
+    log.info("Tenant: %s", tenant_id)
+    tbl("profiles").insert({"id": owner_id, "email": owner_email, "full_name": OWNER_NAME}).execute()
+    log.info("  Profile: %s", owner_email)
+    tbl("tenant_members").insert({"tenant_id": tenant_id, "user_id": owner_id, "role": "org_admin"}).execute()
+    log.info("  Tenant member: %s (org_admin)", owner_email)
+    for s in supervisors:
+        tbl("profiles").insert({"id": s["id"], "email": s["email"], "full_name": s["full_name"]}).execute()
+        log.info("  Profile: %s", s["email"])
+        tbl("tenant_members").insert({"tenant_id": tenant_id, "user_id": s["id"], "role": "member"}).execute()
+        log.info("  Tenant member: %s (member)", s["email"])
 
     # 2) Projects and project_members
     log.info("Projects and members:")
@@ -347,7 +365,43 @@ def seed(
             }).execute()
             log.info("  [%s] Debit: %.2f – %s", proj_name, amt, notes)
 
-    # 7) Master materials (tenant) + materials per project + ledger
+    # 7) Labour types (tenant) + daily labour per project
+    log.info("Labour types (tenant):")
+    labour_type_ids = []
+    for name, rate in LABOUR_TYPES:
+        r = tbl("labour_types").insert({
+            "tenant_id": tenant_id,
+            "name": name,
+            "rate_per_day": rate,
+        }).execute()
+        row = (r.data or [None])[0]
+        if row:
+            labour_type_ids.append((row["id"], name, rate))
+            log.info("  %s (₹%.2f/day)", name, rate)
+
+    log.info("Daily labour counts:")
+    for proj in projects:
+        proj_id = proj["id"]
+        proj_name = proj["name"]
+        sups = [s["id"] for s in proj["supervisors"]]
+        total_entries = 0
+        for d in range(days_labour):
+            dte = today - timedelta(days=d)
+            # Create labour entries for random subset of labour types each day
+            num_types = random.randint(3, min(5, len(labour_type_ids)))
+            for lt_id, _, _ in random.sample(labour_type_ids, num_types):
+                count = random.randint(2, 15)
+                tbl("labour_daily").insert({
+                    "project_id": proj_id,
+                    "labour_type_id": lt_id,
+                    "date": dte.isoformat(),
+                    "count": count,
+                    "created_by": random.choice(sups),
+                }).execute()
+                total_entries += 1
+        log.info("  [%s] %d labour entries (last %d days)", proj_name, total_entries, days_labour)
+
+    # 8) Master materials (tenant) + materials per project + ledger
     log.info("Master materials (catalog):")
     master_ids = []
     for name, unit in MASTER_MATERIALS:
@@ -416,21 +470,23 @@ def seed(
     # Summary
     log.info("--- Seed complete ---")
     log.info("Tenant ID: %s", tenant_id)
-    log.info("Owner login: %s | Password: %s", owner_email, password)
+    log.info("Owner: %s", owner_email)
     log.info("Projects: %s", [p["name"] for p in projects])
     log.info("Supervisors: %s", [s["email"] for s in supervisors])
+    log.info("Labour types: %d (tenant catalog)", len(labour_type_ids))
     log.info("Materials: %d master (catalog), %d project materials with ledger in/out", len(master_ids), len(materials_summary))
-    log.info("Log in as owner to see all sites in the dashboard.")
+    log.info("Create the above users in Supabase Auth (see --print-accounts) and set app_metadata.tenant_id = %s", tenant_id)
 
 
-def _dry_run_print(n_sites: int, days_attendance: int, days_reports: int):
+def _dry_run_print(n_sites: int, days_attendance: int, days_reports: int, days_labour: int):
     n_sup = 3 * n_sites
     log.info("--- Dry run (no writes) ---")
-    log.info("Would create: 1 tenant, 1 owner, %d supervisors, %d projects", n_sup, n_sites)
+    log.info("Requires SEED_OWNER_ID and SEED_SUPERVISOR_IDS (%d ids). Would create: 1 tenant, profiles+tenant_members, %d projects", n_sup, n_sites)
     log.info("Attendance: last %d days per supervisor per project", days_attendance)
     log.info("Daily reports: last %d days with note entries", days_reports)
+    log.info("Labour: last %d days with daily counts per project", days_labour)
     log.info("Plus: task statuses & tasks, task_updates, expense credits/debits,")
-    log.info("      master_materials (catalog), materials per project, material_ledger (in/out)")
+    log.info("      labour_types (catalog), master_materials (catalog), materials per project, material_ledger (in/out)")
 
 
 def run_cleanup(supabase):
@@ -463,37 +519,41 @@ def run_cleanup(supabase):
             tbl("daily_report_entries").delete().eq("daily_report_id", dr["id"]).execute()
         tbl("daily_reports").delete().eq("project_id", pid).execute()
         tbl("expense_transactions").delete().eq("project_id", pid).execute()
+        tbl("labour_daily").delete().eq("project_id", pid).execute()
         mat_r = tbl("materials").select("id").eq("project_id", pid).execute()
         for m in mat_r.data or []:
             tbl("material_ledger").delete().eq("material_id", m["id"]).execute()
         tbl("materials").delete().eq("project_id", pid).execute()
         tbl("project_members").delete().eq("project_id", pid).execute()
     tbl("projects").delete().eq("tenant_id", tenant_id).execute()
+    tbl("labour_types").delete().eq("tenant_id", tenant_id).execute()
     tbl("master_materials").delete().eq("tenant_id", tenant_id).execute()
     tbl("tenant_members").delete().eq("tenant_id", tenant_id).execute()
     for uid in demo_user_ids:
         tbl("profiles").delete().eq("id", uid).execute()
-        try:
-            supabase.auth.admin.delete_user(uid)
-        except Exception:
-            pass
     log.info("Cleanup done for tenant %s", tenant_id)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Seed FieldOps demo data")
+    parser = argparse.ArgumentParser(description="Seed FieldOps demo data (no Auth user creation)")
     parser.add_argument("--dry-run", action="store_true", help="Print what would be created, no writes")
-    parser.add_argument("--cleanup", action="store_true", help="Delete seed data (demo tenant and users)")
+    parser.add_argument("--cleanup", action="store_true", help="Delete seed data for demo tenant")
+    parser.add_argument("--print-accounts", action="store_true", help="Print required user accounts to create manually, then exit")
     parser.add_argument("--sites", type=int, default=None, help="Number of sites (default from SEED_N_SITES or 3)")
     parser.add_argument("--days-attendance", type=int, default=None)
     parser.add_argument("--days-reports", type=int, default=None)
+    parser.add_argument("--days-labour", type=int, default=None)
     args = parser.parse_args()
     n_sites = args.sites if args.sites is not None else int(get_env("SEED_N_SITES", "3"))
     days_attendance = args.days_attendance if args.days_attendance is not None else int(get_env("SEED_DAYS_ATTENDANCE", "14"))
     days_reports = args.days_reports if args.days_reports is not None else int(get_env("SEED_DAYS_REPORTS", "7"))
-    dry_run = args.dry_run or (get_env("SEED_DRY_RUN", "0").strip() == "1")
-    cleanup = args.cleanup or (get_env("SEED_CLEANUP", "0").strip() == "1")
-    seed(dry_run=dry_run, cleanup=cleanup, n_sites=n_sites, days_attendance=days_attendance, days_reports=days_reports)
+    days_labour = args.days_labour if args.days_labour is not None else int(get_env("SEED_DAYS_LABOUR", "14"))
+    if args.print_accounts:
+        print_required_accounts(n_sites)
+        return
+    dry_run = args.dry_run or (os.environ.get("SEED_DRY_RUN", "0").strip() == "1")
+    cleanup = args.cleanup or (os.environ.get("SEED_CLEANUP", "0").strip() == "1")
+    seed(dry_run=dry_run, cleanup=cleanup, n_sites=n_sites, days_attendance=days_attendance, days_reports=days_reports, days_labour=days_labour)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,14 @@ class CacheKeys:
         return f"att:{project_id}:{date}"
 
     @staticmethod
+    def attendance_bulk(project_id: str, from_date: str, to_date: str) -> str:
+        return f"att:b:{project_id}:{from_date}:{to_date}"
+
+    @staticmethod
+    def labour_bulk(project_id: str, from_date: str, to_date: str) -> str:
+        return f"lab:b:{project_id}:{from_date}:{to_date}"
+
+    @staticmethod
     def expense(project_id: str) -> str:
         return f"exp:{project_id}"
 
@@ -78,6 +86,41 @@ class CacheKeys:
     def dr_entries_member(project_id: str, user_id: str, date: str) -> str:
         return f"dr:em:{project_id}:{user_id}:{date}"
 
+    # ── Demo user persistent cache keys ──────────────────────────────────────
+    # These keys use 'demo:' prefix and have very long TTL for demo UX
+    @staticmethod
+    def demo_dashboard(tenant_id: str) -> str:
+        return f"demo:ds:{tenant_id}"
+
+    @staticmethod
+    def demo_dashboard_period(tenant_id: str, from_date: str, to_date: str) -> str:
+        return f"demo:ds:p:{tenant_id}:{from_date}:{to_date}"
+
+    @staticmethod
+    def demo_attendance_bulk(project_id: str, from_date: str, to_date: str) -> str:
+        return f"demo:att:b:{project_id}:{from_date}:{to_date}"
+
+    @staticmethod
+    def demo_labour_bulk(project_id: str, from_date: str, to_date: str) -> str:
+        return f"demo:lab:b:{project_id}:{from_date}:{to_date}"
+
+    @staticmethod
+    def demo_materials(project_id: str) -> str:
+        return f"demo:mat:{project_id}"
+
+    @staticmethod
+    def demo_materials_summary(project_ids: str) -> str:
+        """project_ids is comma-separated list of IDs"""
+        return f"demo:mat:sum:{project_ids}"
+
+    @staticmethod
+    def demo_projects(tenant_id: str) -> str:
+        return f"demo:pj:{tenant_id}"
+
+    @staticmethod
+    def demo_expense(project_id: str) -> str:
+        return f"demo:exp:{project_id}"
+
 
 # ── Token hashing ─────────────────────────────────────────────────────────────
 
@@ -86,7 +129,18 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()[:24]
 
 
+# ── Demo user TTL constant ────────────────────────────────────────────────────
+
+# Demo users get persistent cache (7 days) for instant UX
+DEMO_CACHE_TTL = 60 * 60 * 24 * 7  # 7 days
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def is_demo_user(tenant_role: str | None) -> bool:
+    """Check if the current user is a demo user based on their tenant role."""
+    return tenant_role == "demo"
+
 
 def cache_get(redis: Any, key: str) -> Any:
     """Return deserialised cached value or None. Never raises."""

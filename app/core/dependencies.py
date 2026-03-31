@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from functools import lru_cache
 
 from fastapi import Depends, Header, HTTPException, Query
 from supabase import Client, create_client
@@ -13,10 +14,33 @@ from app.core.tenants_client import get_core_user_role
 logger = logging.getLogger(__name__)
 
 
-def get_supabase_client(settings: Settings = Depends(get_settings)) -> Client:
+@lru_cache()
+def _get_supabase_singleton() -> Client | None:
+    """
+    Return a Supabase Client singleton with connection pooling.
+    Decorated with @lru_cache so the same instance is reused across all requests.
+    Returns None if SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY are not configured.
+    """
+    settings = get_settings()
     if not settings.SUPABASE_URL or not settings.SUPABASE_SERVICE_ROLE_KEY:
+        logger.warning("Supabase not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)")
+        return None
+    try:
+        return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+    except Exception as exc:
+        logger.error(f"Failed to create Supabase client: {exc}")
+        return None
+
+
+def get_supabase_client() -> Client:
+    """
+    FastAPI dependency that returns the singleton Supabase client.
+    Raises HTTPException if Supabase is not configured.
+    """
+    client = _get_supabase_singleton()
+    if client is None:
         raise HTTPException(status_code=503, detail="Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)")
-    return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+    return client
 
 
 def get_bearer_token(authorization: str | None = Header(None, alias="Authorization")) -> str:
@@ -113,44 +137,69 @@ def get_tenant_membership(
     token: str | None = None,
     settings: Settings | None = None,
 ) -> str | None:
+    """
+    Get user's role in a tenant with multi-level caching.
+    - Checks Redis cache first
+    - Falls back to database query
+    - Caches all roles (org_admin/demo: 5min TTL, others: 1min TTL)
+    """
     key = CacheKeys.tenant_member(tenant_id, user_id)
+
+    # Check Redis cache first
     cached = cache_get(redis, key)
     if cached is not None:
+        logger.debug(f"Cache HIT for tenant_membership {key}: {cached}")
         return cached
 
-    r = (
-        supabase.schema(DB_SCHEMA).table("tenant_members")
-        .select("role")
-        .eq("tenant_id", tenant_id)
-        .eq("user_id", user_id)
-        .maybe_single()
-        .execute()
-    )
-    if r and r.data:
-        row = r.data[0] if isinstance(r.data, list) and r.data else r.data
-        role = row.get("role") if isinstance(row, dict) else None
-        if role:
-            cache_set(redis, key, role, ttl=300)
-        return role
+    logger.debug(f"Cache MISS for tenant_membership {key}, querying database")
+
+    try:
+        r = (
+            supabase.schema(DB_SCHEMA).table("tenant_members")
+            .select("role")
+            .eq("tenant_id", tenant_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if r and r.data and len(r.data) > 0:
+            role = r.data[0].get("role") if isinstance(r.data[0], dict) else None
+            if role:
+                # Cache all roles with appropriate TTL
+                # org_admin and demo: longer TTL (5 min) as these rarely change
+                # member/worker: shorter TTL (1 min) to reflect permission changes faster
+                ttl = 300 if role in ("org_admin", "demo") else 60
+                cache_set(redis, key, role, ttl=ttl)
+                logger.debug(f"Cached tenant_membership {key}={role} with TTL={ttl}s")
+            return role
+    except Exception as e:
+        logger.warning(f"Error querying tenant_members: {e}")
 
     # No membership record found — attempt bootstrap for new tenants.
     # _ensure_first_tenant_admin raises 403 if the tenant already exists with members
     # or if the user is not a core_service admin.
     _ensure_first_tenant_admin(tenant_id, user_id, supabase, token=token, settings=settings)
-    r2 = (
-        supabase.schema(DB_SCHEMA).table("tenant_members")
-        .select("role")
-        .eq("tenant_id", tenant_id)
-        .eq("user_id", user_id)
-        .maybe_single()
-        .execute()
-    )
-    if r2 and r2.data:
-        row = r2.data[0] if isinstance(r2.data, list) and r2.data else r2.data
-        role = row.get("role") if isinstance(row, dict) else None
-        if role:
-            cache_set(redis, key, role, ttl=300)
-        return role
+
+    try:
+        r2 = (
+            supabase.schema(DB_SCHEMA).table("tenant_members")
+            .select("role")
+            .eq("tenant_id", tenant_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if r2 and r2.data and len(r2.data) > 0:
+            role = r2.data[0].get("role") if isinstance(r2.data[0], dict) else None
+            if role:
+                # Cache all roles with appropriate TTL
+                ttl = 300 if role in ("org_admin", "demo") else 60
+                cache_set(redis, key, role, ttl=ttl)
+                logger.debug(f"Cached tenant_membership {key}={role} with TTL={ttl}s (after bootstrap)")
+            return role
+    except Exception as e:
+        logger.warning(f"Error querying tenant_members after bootstrap: {e}")
+
     return None
 
 
@@ -203,7 +252,7 @@ def ensure_project_access(
         supabase.schema(DB_SCHEMA).table("projects")
         .select("id, tenant_id")
         .eq("id", project_id)
-        .maybe_single()
+        .limit(1)
         .execute()
     )
     proj = _first_row(proj_result)
@@ -213,17 +262,17 @@ def ensure_project_access(
         raise HTTPException(status_code=403, detail="Project not in your tenant")
     tenant_role = get_tenant_membership(tenant_id, user_id, supabase, redis=redis, token=token, settings=settings)
     if tenant_role == "org_admin":
-        return {"project_id": project_id, "tenant_id": tenant_id, "role": "admin"}
+        return {"project_id": project_id, "tenant_id": tenant_id, "role": "admin", "tenant_role": tenant_role}
     if tenant_role == "demo":
         if required_permission not in READ_PERMISSIONS:
             raise HTTPException(status_code=403, detail="demo_mode")
-        return {"project_id": project_id, "tenant_id": tenant_id, "role": "viewer"}
+        return {"project_id": project_id, "tenant_id": tenant_id, "role": "viewer", "tenant_role": tenant_role}
     mem_result = (
         supabase.schema(DB_SCHEMA).table("project_members")
         .select("role")
         .eq("project_id", project_id)
         .eq("user_id", user_id)
-        .maybe_single()
+        .limit(1)
         .execute()
     )
     mem = _first_row(mem_result)
@@ -232,7 +281,7 @@ def ensure_project_access(
     role = mem.get("role") or "viewer"
     if not has_permission(role, required_permission):
         raise HTTPException(status_code=403, detail="Insufficient permission")
-    return {"project_id": project_id, "tenant_id": tenant_id, "role": role}
+    return {"project_id": project_id, "tenant_id": tenant_id, "role": role, "tenant_role": tenant_role}
 
 
 def get_project_access(required_permission: str):

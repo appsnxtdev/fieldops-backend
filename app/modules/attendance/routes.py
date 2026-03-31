@@ -1,10 +1,11 @@
 import csv
 import io
+import re
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
-from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client
+from app.core.cache import DEMO_CACHE_TTL, CacheKeys, cache_delete, cache_get, cache_set, get_redis_client, is_demo_user
 from app.core.dependencies import get_current_user, get_project_access, get_supabase_client
 from app.core.permissions import CAN_LOG_ATTENDANCE, CAN_VIEW_ATTENDANCE
 from app.modules.attendance.schemas import AttendanceResponse
@@ -92,6 +93,78 @@ def list_attendance_route(
         return cached
     result = list_attendance(supabase, project_id, date)
     cache_set(redis, key, [r if isinstance(r, dict) else r.model_dump() for r in result], ttl=30)
+    return result
+
+
+@router.get("/{project_id}/bulk")
+def list_attendance_bulk_route(
+    project_id: str,
+    from_date: str = Query(..., description="Start date YYYY-MM-DD"),
+    to_date: str = Query(..., description="End date YYYY-MM-DD"),
+    access: dict = Depends(get_project_access(CAN_VIEW_ATTENDANCE)),
+    supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
+):
+    """Get attendance for a project across a date range (bulk fetch to reduce API calls)."""
+    # Validate date format
+    date_pattern = r'^\d{4}-\d{2}-\d{2}$'
+    if not re.match(date_pattern, from_date) or not re.match(date_pattern, to_date):
+        raise HTTPException(status_code=400, detail="Invalid date format. Expected YYYY-MM-DD")
+
+    # Check if demo user for persistent caching (7-day TTL vs 2-min TTL)
+    tenant_role = access.get("tenant_role")
+    is_demo = is_demo_user(tenant_role)
+
+    if is_demo:
+        key = CacheKeys.demo_attendance_bulk(project_id, from_date, to_date)
+        ttl = DEMO_CACHE_TTL
+    else:
+        key = CacheKeys.attendance_bulk(project_id, from_date, to_date)
+        ttl = 120
+
+    cached = cache_get(redis, key)
+    if cached is not None:
+        return cached
+
+    from app.modules.users.service import get_profiles_by_ids
+
+    try:
+        rows = list_attendance_in_range(supabase, project_id, from_date, to_date)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid date range: {str(e)}")
+    if not rows:
+        result = {"by_date": {}}
+        cache_set(redis, key, result, ttl=ttl)
+        return result
+
+    # Group by date
+    by_date: dict[str, list[dict]] = {}
+    for row in rows:
+        date = row.get("date")
+        if date:
+            if date not in by_date:
+                by_date[date] = []
+            by_date[date].append(row)
+
+    # Fetch all profiles once
+    user_ids = list({row["user_id"] for row in rows if row.get("user_id")})
+    profiles = get_profiles_by_ids(supabase, user_ids)
+    profile_map = {p.id: p for p in profiles}
+
+    # Enrich with profile data
+    for date, date_rows in by_date.items():
+        enriched = []
+        for row in date_rows:
+            profile = profile_map.get(row["user_id"])
+            enriched.append({
+                **row,
+                "user_full_name": profile.full_name if profile else None,
+                "user_email": profile.email if profile else None,
+            })
+        by_date[date] = enriched
+
+    result = {"by_date": by_date}
+    cache_set(redis, key, result, ttl=ttl)
     return result
 
 

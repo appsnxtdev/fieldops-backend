@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
-from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client
+from app.core.cache import DEMO_CACHE_TTL, CacheKeys, cache_delete, cache_get, cache_set, get_redis_client, is_demo_user
 from app.core.constants import DB_SCHEMA
 from app.core.dependencies import (
     _first_row,
@@ -37,14 +37,21 @@ def _project_ids_user_can_view(
     supabase: Client, tenant_id: str, user_id: str, requested_ids: list[str],
 ) -> list[tuple[str, str]]:
     """Return (project_id, project_name) for each requested project user can view."""
-    from app.core.permissions import has_permission
-
     tenant_role_r = (
         supabase.schema(DB_SCHEMA).table("tenant_members").select("role").eq("tenant_id", tenant_id).eq("user_id", user_id).maybe_single().execute()
     )
     tenant_role = _first_row(tenant_role_r)
     role = (tenant_role.get("role") if tenant_role else None) or "member"
-    if role == "org_admin":
+    return _project_ids_user_can_view_with_role(supabase, tenant_id, user_id, requested_ids, role)
+
+
+def _project_ids_user_can_view_with_role(
+    supabase: Client, tenant_id: str, user_id: str, requested_ids: list[str], role: str | None
+) -> list[tuple[str, str]]:
+    """Return (project_id, project_name) for each requested project user can view, given a known role."""
+    role = role or "member"
+    # org_admin and demo users can view all projects
+    if role in ("org_admin", "demo"):
         r = supabase.schema(DB_SCHEMA).table("projects").select("id, name").eq("tenant_id", tenant_id).in_("id", requested_ids or []).execute()
         return [(row["id"], row["name"]) for row in (r.data or [])]
     r = (
@@ -64,15 +71,44 @@ def materials_summary_route(
     tenant_id: str = Depends(get_tenant_id),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     ids = [x.strip() for x in project_ids.split(",") if x.strip()]
     if not ids:
         return []
-    projects = _project_ids_user_can_view(supabase, tenant_id, current_user["id"], ids)
+
+    # Get tenant role using cached function
+    from app.core.dependencies import get_tenant_membership
+    tenant_role = get_tenant_membership(tenant_id, current_user["id"], supabase, redis=redis)
+    is_demo = is_demo_user(tenant_role)
+
+    if is_demo:
+        key = CacheKeys.demo_materials_summary(project_ids)
+        ttl = DEMO_CACHE_TTL
+    else:
+        # Regular users don't get cached summary (varies per user permissions)
+        key = None
+        ttl = 0
+
+    if key:
+        cached = cache_get(redis, key)
+        if cached is not None:
+            # If cache is empty but we have project IDs, it's stale - invalidate it
+            if len(cached) == 0 and len(ids) > 0:
+                cache_delete(redis, key)
+            else:
+                return [ProjectMaterialsSummary(**item) for item in cached]
+
+    # Use the already-fetched tenant_role to avoid redundant DB query
+    projects = _project_ids_user_can_view_with_role(supabase, tenant_id, current_user["id"], ids, tenant_role)
     out = []
     for pid, pname in projects:
         materials = list_materials_with_balance(supabase, pid)
         out.append(ProjectMaterialsSummary(project_id=pid, project_name=pname, materials=materials))
+
+    if key:
+        cache_set(redis, key, [item.model_dump() for item in out], ttl=ttl)
+
     return out
 
 
@@ -83,12 +119,23 @@ def list_materials_route(
     supabase: Client = Depends(get_supabase_client),
     redis=Depends(get_redis_client),
 ):
-    key = CacheKeys.materials(project_id)
+    # Check if demo user for persistent caching
+    tenant_role = access.get("tenant_role")
+    is_demo = is_demo_user(tenant_role)
+
+    if is_demo:
+        key = CacheKeys.demo_materials(project_id)
+        ttl = DEMO_CACHE_TTL
+    else:
+        key = CacheKeys.materials(project_id)
+        ttl = 120
+
     cached = cache_get(redis, key)
     if cached is not None:
         return [MaterialWithBalanceResponse(**item) for item in cached]
+
     result = list_materials_with_balance(supabase, project_id)
-    cache_set(redis, key, [item.model_dump() for item in result], ttl=120)
+    cache_set(redis, key, [item.model_dump() for item in result], ttl=ttl)
     return result
 
 

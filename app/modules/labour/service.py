@@ -86,37 +86,27 @@ def delete_labour_type(supabase: Client, type_id: str, tenant_id: str) -> None:
 def list_labour_daily_for_date(
     supabase: Client, project_id: str, date: str, tenant_id: str
 ) -> list[LabourDailyEntryResponse]:
+    # Use a join to fetch labour_daily with labour_types in one query
     r = (
         supabase.schema(DB_SCHEMA)
         .table("labour_daily")
-        .select("labour_type_id, count")
+        .select("labour_type_id, count, labour_types!inner(id, name, rate_per_day, tenant_id)")
         .eq("project_id", project_id)
         .eq("date", date)
+        .eq("labour_types.tenant_id", tenant_id)
         .execute()
     )
     rows = r.data or []
-    if not rows:
-        return []
-    type_ids = list({x["labour_type_id"] for x in rows})
-    types_r = (
-        supabase.schema(DB_SCHEMA)
-        .table("labour_types")
-        .select("id, name, rate_per_day")
-        .eq("tenant_id", tenant_id)
-        .in_("id", type_ids)
-        .execute()
-    )
-    type_map = {x["id"]: x for x in (types_r.data or [])}
     result = []
     for row in rows:
         tid = row["labour_type_id"]
-        t = type_map.get(tid, {})
+        type_data = row.get("labour_types", {})
         count = row.get("count", 0)
-        rate = float(t.get("rate_per_day", 0))
+        rate = float(type_data.get("rate_per_day", 0))
         result.append(
             LabourDailyEntryResponse(
                 labour_type_id=tid,
-                labour_type_name=t.get("name", ""),
+                labour_type_name=type_data.get("name", ""),
                 rate_per_day=rate,
                 count=count,
                 amount=round(count * rate, 2),

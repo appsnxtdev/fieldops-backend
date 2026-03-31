@@ -70,7 +70,14 @@ def patch_tenant_member(
         if str(e) == "tenant_member_not_found":
             raise HTTPException(status_code=404, detail="Tenant member not found")
         raise
-    cache_delete(redis, CacheKeys.tenant_member(tenant_id, user_id))
+    # Clear all caches related to this user's role change
+    cache_delete(
+        redis,
+        CacheKeys.tenant_member(tenant_id, user_id),
+        CacheKeys.projects_admin(tenant_id),  # Clear org-wide projects cache
+        CacheKeys.projects_member(tenant_id, user_id),  # Clear user-specific projects cache
+        CacheKeys.dashboard(tenant_id, user_id),  # Clear dashboard cache
+    )
     return result
 
 
@@ -82,4 +89,11 @@ def delete_tenant_member(
     redis=Depends(get_redis_client),
 ):
     remove_member(supabase, tenant_id, user_id)
-    cache_delete(redis, CacheKeys.tenant_member(tenant_id, user_id))
+    # Clear all caches related to this user
+    cache_delete(
+        redis,
+        CacheKeys.tenant_member(tenant_id, user_id),
+        CacheKeys.projects_admin(tenant_id),
+        CacheKeys.projects_member(tenant_id, user_id),
+        CacheKeys.dashboard(tenant_id, user_id),
+    )

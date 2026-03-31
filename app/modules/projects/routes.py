@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client
+from app.core.cache import DEMO_CACHE_TTL, CacheKeys, cache_delete, cache_get, cache_set, get_redis_client, is_demo_user
 from app.core.dependencies import (
     get_current_user,
     get_project_access,
@@ -43,12 +43,27 @@ def list_my_projects(
     redis=Depends(get_redis_client),
 ):
     role = get_tenant_membership(tenant_id, current_user["id"], supabase, redis=redis)
-    key = CacheKeys.projects_admin(tenant_id) if role == "org_admin" else CacheKeys.projects_member(tenant_id, current_user["id"])
-    cached = cache_get(redis, key)
-    if cached is not None:
-        return cached
+
+    # Cache for org_admin and demo users (demo gets 7-day persistent cache)
+    should_cache = role == "org_admin" or is_demo_user(role)
+
+    if should_cache:
+        if is_demo_user(role):
+            key = CacheKeys.demo_projects(tenant_id)
+            ttl = DEMO_CACHE_TTL
+        else:
+            key = CacheKeys.projects_admin(tenant_id)
+            ttl = 120
+
+        cached = cache_get(redis, key)
+        if cached is not None:
+            return cached
+
     result = list_projects(supabase, tenant_id, current_user["id"], tenant_role=role)
-    cache_set(redis, key, [r.model_dump() for r in result], ttl=120)
+
+    if should_cache:
+        cache_set(redis, key, [r.model_dump() for r in result], ttl=ttl)
+
     return result
 
 
@@ -125,10 +140,53 @@ def delete_project_route(
 @router.get("/{project_id}/members", response_model=list[ProjectMemberResponse])
 def list_members_route(
     project_id: str,
-    access: dict = Depends(get_project_access(CAN_MANAGE_MEMBERS)),
+    tenant_id: str = Depends(get_tenant_id),
+    current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return list_project_members(supabase, project_id)
+    from app.core.dependencies import get_tenant_membership
+
+    # Check if user is org_admin - if so, allow viewing members of any project in tenant
+    tenant_role = get_tenant_membership(tenant_id, current_user["id"], supabase, redis=redis)
+
+    if tenant_role == "org_admin":
+        # Org admins can view members of any project in their tenant
+        # Just verify the project belongs to their tenant
+        proj = get_project(supabase, project_id, tenant_id)
+        if not proj:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return list_project_members(supabase, project_id)
+    else:
+        # Non-org_admins need CAN_MANAGE_MEMBERS permission on the project
+        # This will be checked by requiring the user to be a project member with appropriate role
+        from app.core.dependencies import ensure_project_access
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        # We need the bearer token for ensure_project_access
+        from fastapi import Request
+        # Since we can't inject Request here easily, let's use a simpler check
+        # Check project membership directly
+        from app.core.constants import DB_SCHEMA
+        mem_result = (
+            supabase.schema(DB_SCHEMA).table("project_members")
+            .select("role")
+            .eq("project_id", project_id)
+            .eq("user_id", current_user["id"])
+            .limit(1)
+            .execute()
+        )
+        mem = mem_result.data[0] if mem_result.data else None
+        if not mem:
+            raise HTTPException(status_code=403, detail="Not a project member")
+
+        from app.core.permissions import has_permission
+        role = mem.get("role") or "viewer"
+        if not has_permission(role, CAN_MANAGE_MEMBERS):
+            raise HTTPException(status_code=403, detail="Insufficient permission")
+
+        return list_project_members(supabase, project_id)
 
 
 @router.post("/{project_id}/members", response_model=ProjectMemberResponse, status_code=201)
