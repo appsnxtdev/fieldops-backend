@@ -28,25 +28,31 @@ def get_wallet(
     supabase: Client = Depends(get_supabase_client),
     redis=Depends(get_redis_client),
 ):
-    # Check if demo user for persistent caching
+    # Only cache for admin users (demo users are considered admin for caching purposes)
+    role = access.get("role")
     tenant_role = access.get("tenant_role")
     is_demo = is_demo_user(tenant_role)
+    should_cache = role == "admin" or is_demo
 
-    if is_demo:
-        key = CacheKeys.demo_expense(project_id)
-        ttl = DEMO_CACHE_TTL
-    else:
-        key = CacheKeys.expense(project_id)
-        ttl = 30
+    if should_cache:
+        if is_demo:
+            key = CacheKeys.demo_expense(project_id)
+            ttl = DEMO_CACHE_TTL
+        else:
+            key = CacheKeys.expense(project_id)
+            ttl = 30
 
-    cached = cache_get(redis, key)
-    if cached is not None:
-        return WalletBalanceResponse(**cached)
+        cached = cache_get(redis, key)
+        if cached is not None:
+            return WalletBalanceResponse(**cached)
 
     balance = get_balance(supabase, project_id)
     transactions = list_transactions(supabase, project_id)
     result = WalletBalanceResponse(balance=balance, transactions=transactions)
-    cache_set(redis, key, result.model_dump(), ttl=ttl)
+
+    if should_cache:
+        cache_set(redis, key, result.model_dump(), ttl=ttl)
+
     return result
 
 
@@ -111,11 +117,23 @@ def create_credit(
     redis=Depends(get_redis_client),
 ):
     result = add_credit(supabase, project_id, payload.amount, payload.notes, current_user["id"])
-    cache_delete(
-        redis,
-        CacheKeys.expense(project_id),
-        CacheKeys.dashboard(access["tenant_id"], current_user["id"]),
-    )
+
+    # Invalidate cache - check if demo user to use correct cache keys
+    tenant_role = access.get("tenant_role")
+    keys_to_delete = []
+
+    if is_demo_user(tenant_role):
+        keys_to_delete.extend([
+            CacheKeys.demo_expense(project_id),
+            CacheKeys.demo_dashboard(access["tenant_id"]),
+        ])
+    else:
+        keys_to_delete.extend([
+            CacheKeys.expense(project_id),
+            CacheKeys.dashboard(access["tenant_id"], current_user["id"]),
+        ])
+
+    cache_delete(redis, *keys_to_delete)
     return result
 
 
@@ -134,9 +152,21 @@ async def create_debit(
     key = str(uuid.uuid4())
     path = upload_receipt(supabase, project_id, key, receipt)
     result = add_debit(supabase, project_id, amount, path, notes, current_user["id"])
-    cache_delete(
-        redis,
-        CacheKeys.expense(project_id),
-        CacheKeys.dashboard(access["tenant_id"], current_user["id"]),
-    )
+
+    # Invalidate cache - check if demo user to use correct cache keys
+    tenant_role = access.get("tenant_role")
+    keys_to_delete = []
+
+    if is_demo_user(tenant_role):
+        keys_to_delete.extend([
+            CacheKeys.demo_expense(project_id),
+            CacheKeys.demo_dashboard(access["tenant_id"]),
+        ])
+    else:
+        keys_to_delete.extend([
+            CacheKeys.expense(project_id),
+            CacheKeys.dashboard(access["tenant_id"], current_user["id"]),
+        ])
+
+    cache_delete(redis, *keys_to_delete)
     return result

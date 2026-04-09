@@ -25,8 +25,8 @@ router = APIRouter()
 async def attendance_check_in(
     project_id: str,
     date: str = Form(...),
-    lat: float = Form(...),
-    lng: float = Form(...),
+    lat: float | None = Form(None),
+    lng: float | None = Form(None),
     selfie: UploadFile = File(...),
     access: dict = Depends(get_project_access(CAN_LOG_ATTENDANCE)),
     current_user: dict = Depends(get_current_user),
@@ -54,8 +54,8 @@ async def attendance_check_in(
 async def attendance_check_out(
     project_id: str,
     date: str = Form(...),
-    lat: float = Form(...),
-    lng: float = Form(...),
+    lat: float | None = Form(None),
+    lng: float | None = Form(None),
     selfie: UploadFile = File(...),
     access: dict = Depends(get_project_access(CAN_LOG_ATTENDANCE)),
     current_user: dict = Depends(get_current_user),
@@ -87,12 +87,22 @@ def list_attendance_route(
     supabase: Client = Depends(get_supabase_client),
     redis=Depends(get_redis_client),
 ):
-    key = CacheKeys.attendance(project_id, date)
-    cached = cache_get(redis, key)
-    if cached is not None:
-        return cached
+    # Only cache for admin users
+    role = access.get("role")
+    should_cache = role == "admin"
+
+    if should_cache:
+        key = CacheKeys.attendance(project_id, date)
+        cached = cache_get(redis, key)
+        if cached is not None:
+            return cached
+
     result = list_attendance(supabase, project_id, date)
-    cache_set(redis, key, [r if isinstance(r, dict) else r.model_dump() for r in result], ttl=30)
+
+    if should_cache:
+        key = CacheKeys.attendance(project_id, date)
+        cache_set(redis, key, [r if isinstance(r, dict) else r.model_dump() for r in result], ttl=30)
+
     return result
 
 
@@ -111,20 +121,23 @@ def list_attendance_bulk_route(
     if not re.match(date_pattern, from_date) or not re.match(date_pattern, to_date):
         raise HTTPException(status_code=400, detail="Invalid date format. Expected YYYY-MM-DD")
 
-    # Check if demo user for persistent caching (7-day TTL vs 2-min TTL)
+    # Only cache for admin users (demo users are considered admin for caching purposes)
+    role = access.get("role")
     tenant_role = access.get("tenant_role")
     is_demo = is_demo_user(tenant_role)
+    should_cache = role == "admin" or is_demo
 
-    if is_demo:
-        key = CacheKeys.demo_attendance_bulk(project_id, from_date, to_date)
-        ttl = DEMO_CACHE_TTL
-    else:
-        key = CacheKeys.attendance_bulk(project_id, from_date, to_date)
-        ttl = 120
+    if should_cache:
+        if is_demo:
+            key = CacheKeys.demo_attendance_bulk(project_id, from_date, to_date)
+            ttl = DEMO_CACHE_TTL
+        else:
+            key = CacheKeys.attendance_bulk(project_id, from_date, to_date)
+            ttl = 120
 
-    cached = cache_get(redis, key)
-    if cached is not None:
-        return cached
+        cached = cache_get(redis, key)
+        if cached is not None:
+            return cached
 
     from app.modules.users.service import get_profiles_by_ids
 
@@ -134,7 +147,8 @@ def list_attendance_bulk_route(
         raise HTTPException(status_code=400, detail=f"Invalid date range: {str(e)}")
     if not rows:
         result = {"by_date": {}}
-        cache_set(redis, key, result, ttl=ttl)
+        if should_cache:
+            cache_set(redis, key, result, ttl=ttl)
         return result
 
     # Group by date
@@ -164,7 +178,8 @@ def list_attendance_bulk_route(
         by_date[date] = enriched
 
     result = {"by_date": by_date}
-    cache_set(redis, key, result, ttl=ttl)
+    if should_cache:
+        cache_set(redis, key, result, ttl=ttl)
     return result
 
 

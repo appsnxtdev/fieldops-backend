@@ -38,12 +38,22 @@ def recent_dates_route(
 ):
     """Return report dates that have at least one report (most recent first), for default date in mobile."""
     pid = access["project_id"]
-    key = CacheKeys.dr_recent_dates(pid)
-    cached = cache_get(redis, key)
-    if cached is not None:
-        return cached
+    # Only cache for admin users
+    role = access.get("role")
+    should_cache = role == "admin"
+
+    if should_cache:
+        key = CacheKeys.dr_recent_dates(pid)
+        cached = cache_get(redis, key)
+        if cached is not None:
+            return cached
+
     result = list_recent_dates_with_reports(supabase, pid, limit)
-    cache_set(redis, key, result, ttl=30)
+
+    if should_cache:
+        key = CacheKeys.dr_recent_dates(pid)
+        cache_set(redis, key, result, ttl=30)
+
     return result
 
 
@@ -70,13 +80,23 @@ def list_reports_route(
 ):
     """List all daily reports for a project on a given date (office view)."""
     pid = access["project_id"]
-    key = CacheKeys.dr_list(pid, report_date)
-    cached = cache_get(redis, key)
-    if cached is not None:
-        return [DailyReportListResponse(**r) for r in cached]
+    # Only cache for admin users
+    role = access.get("role")
+    should_cache = role == "admin"
+
+    if should_cache:
+        key = CacheKeys.dr_list(pid, report_date)
+        cached = cache_get(redis, key)
+        if cached is not None:
+            return [DailyReportListResponse(**r) for r in cached]
+
     rows = list_reports_for_project_date(supabase, pid, report_date)
     result = [DailyReportListResponse(**r) for r in rows]
-    cache_set(redis, key, [r.model_dump() for r in result], ttl=30)
+
+    if should_cache:
+        key = CacheKeys.dr_list(pid, report_date)
+        cache_set(redis, key, [r.model_dump() for r in result], ttl=30)
+
     return result
 
 
@@ -125,6 +145,7 @@ def list_report_entries(
 ):
     role = access.get("role")
     if role == "admin":
+        # Only cache for admin users
         key = CacheKeys.dr_entries_all(project_id, report_date)
         cached = cache_get(redis, key)
         if cached is not None:
@@ -133,14 +154,10 @@ def list_report_entries(
         cache_set(redis, key, [e.model_dump() if hasattr(e, "model_dump") else e for e in result], ttl=30)
         return result
     else:
+        # Non-admin users: no caching to avoid stale data
         uid = current_user["id"]
-        key = CacheKeys.dr_entries_member(project_id, uid, report_date)
-        cached = cache_get(redis, key)
-        if cached is not None:
-            return [DailyReportEntryResponse(**e) for e in cached]
         report = get_or_create_report(supabase, project_id, uid, report_date)
         result = list_entries(supabase, report["id"])
-        cache_set(redis, key, [e.model_dump() if hasattr(e, "model_dump") else e for e in result], ttl=30)
         return result
 
 

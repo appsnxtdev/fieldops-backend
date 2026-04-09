@@ -78,6 +78,7 @@ def get_dashboard_summary(
     only_my_tasks = tenant_role not in ("org_admin", "demo")
     for p in projects:
         balance = get_balance(supabase, p.id)
+        rounded_balance = round(balance, 2)
         tasks = list_tasks(supabase, p.id)
         statuses = list_statuses(supabase, p.id)
         status_id_to_name = {s.id: s.name for s in statuses}
@@ -95,14 +96,14 @@ def get_dashboard_summary(
                 project_id=p.id,
                 project_name=p.name,
                 location=p.location or p.address,
-                wallet_balance=balance,
+                wallet_balance=rounded_balance,
                 task_count=len(tasks_for_count),
                 due_tasks=due_count,
                 today_attendance_count=count_present,
             )
         )
         total_present += count_present
-        total_wallet += balance
+        total_wallet += rounded_balance
         total_tasks_count += len(tasks_for_count)
         total_due_count += due_count
     return DashboardSummaryResponse(

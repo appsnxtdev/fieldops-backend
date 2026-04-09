@@ -18,6 +18,7 @@ from app.modules.labour import labour_types_routes as labour_types_routes
 from app.modules.labour import routes as labour_routes
 from app.modules.master_materials import routes as master_materials_routes
 from app.modules.materials import routes as materials_routes
+from app.modules.mobile import routes as mobile_routes
 from app.modules.projects import routes as projects_routes
 from app.modules.storage import routes as storage_routes
 from app.modules.tasks import routes as tasks_routes
@@ -39,20 +40,6 @@ def _sanitize_for_json(obj):
     return obj
 
 
-_settings = get_settings()
-logging.basicConfig(
-    level=getattr(logging, _settings.LOG_LEVEL.upper(), logging.INFO),
-    format="%(levelname)s %(name)s %(message)s",
-)
-
-_disable_docs = _settings.ENV == "production"
-app = FastAPI(
-    title="FieldOps API",
-    version="0.1.0",
-    docs_url=None if _disable_docs else "/docs",
-    redoc_url=None if _disable_docs else "/redoc",
-    openapi_url=None if _disable_docs else "/openapi.json",
-)
 _settings = get_settings()
 logging.basicConfig(
     level=getattr(logging, _settings.LOG_LEVEL.upper(), logging.INFO),
@@ -115,7 +102,6 @@ _origins = [o.strip() for o in _settings.ALLOWED_ORIGINS.split(",") if o.strip()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
-    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -136,4 +122,5 @@ app.include_router(constants_routes.router, prefix="/api/v1/constants", tags=["c
 app.include_router(expense_routes.router, prefix="/api/v1/expense", tags=["expense"])
 app.include_router(labour_routes.router, prefix="/api/v1/labour", tags=["labour"])
 app.include_router(labour_types_routes.router, prefix="/api/v1/labour-types", tags=["labour-types"])
+app.include_router(mobile_routes.router, prefix="/api/v1/mobile", tags=["mobile"])
 app.include_router(storage_routes.router, prefix="/api/v1/storage", tags=["storage"])

@@ -38,12 +38,22 @@ def list_statuses_route(
     supabase: Client = Depends(get_supabase_client),
     redis=Depends(get_redis_client),
 ):
-    key = CacheKeys.task_statuses(project_id)
-    cached = cache_get(redis, key)
-    if cached is not None:
-        return cached
+    # Only cache for admin users
+    role = access.get("role")
+    should_cache = role == "admin"
+
+    if should_cache:
+        key = CacheKeys.task_statuses(project_id)
+        cached = cache_get(redis, key)
+        if cached is not None:
+            return cached
+
     result = list_statuses(supabase, project_id)
-    cache_set(redis, key, [r.model_dump() for r in result], ttl=600)
+
+    if should_cache:
+        key = CacheKeys.task_statuses(project_id)
+        cache_set(redis, key, [r.model_dump() for r in result], ttl=600)
+
     return result
 
 
@@ -94,16 +104,26 @@ def list_tasks_route(
     supabase: Client = Depends(get_supabase_client),
     redis=Depends(get_redis_client),
 ):
-    key = CacheKeys.tasks(project_id)
-    cached = cache_get(redis, key)
-    if cached is not None:
-        tasks = [TaskResponse(**t) for t in cached]
-    else:
-        tasks = list_tasks(supabase, project_id)
+    role = access.get("role")
+    # Only cache for admin users to avoid serving stale filtered data
+    should_cache = role == "admin"
+
+    if should_cache:
+        key = CacheKeys.tasks(project_id)
+        cached = cache_get(redis, key)
+        if cached is not None:
+            return [TaskResponse(**t) for t in cached]
+
+    tasks = list_tasks(supabase, project_id)
+
+    if should_cache:
+        key = CacheKeys.tasks(project_id)
         cache_set(redis, key, [t.model_dump() for t in tasks], ttl=120)
-    # Member-role filter always applied after cache lookup (security: never cache filtered list)
-    if access.get("role") == "member":
+
+    # Member-role filter applied for non-admin users
+    if role == "member":
         tasks = [t for t in tasks if t.assignee_id == current_user["id"]]
+
     return tasks
 
 

@@ -58,5 +58,6 @@ class TaskUpdateNoteResponse(BaseModel):
     task_id: str
     project_id: str
     author_id: str
+    author_name: str | None = None
     note: str
     created_at: str | None = None

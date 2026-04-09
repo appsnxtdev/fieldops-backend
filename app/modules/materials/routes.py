@@ -119,23 +119,29 @@ def list_materials_route(
     supabase: Client = Depends(get_supabase_client),
     redis=Depends(get_redis_client),
 ):
-    # Check if demo user for persistent caching
+    # Only cache for admin users (demo users are considered admin for caching purposes)
+    role = access.get("role")
     tenant_role = access.get("tenant_role")
     is_demo = is_demo_user(tenant_role)
+    should_cache = role == "admin" or is_demo
 
-    if is_demo:
-        key = CacheKeys.demo_materials(project_id)
-        ttl = DEMO_CACHE_TTL
-    else:
-        key = CacheKeys.materials(project_id)
-        ttl = 120
+    if should_cache:
+        if is_demo:
+            key = CacheKeys.demo_materials(project_id)
+            ttl = DEMO_CACHE_TTL
+        else:
+            key = CacheKeys.materials(project_id)
+            ttl = 120
 
-    cached = cache_get(redis, key)
-    if cached is not None:
-        return [MaterialWithBalanceResponse(**item) for item in cached]
+        cached = cache_get(redis, key)
+        if cached is not None:
+            return [MaterialWithBalanceResponse(**item) for item in cached]
 
     result = list_materials_with_balance(supabase, project_id)
-    cache_set(redis, key, [item.model_dump() for item in result], ttl=ttl)
+
+    if should_cache:
+        cache_set(redis, key, [item.model_dump() for item in result], ttl=ttl)
+
     return result
 
 

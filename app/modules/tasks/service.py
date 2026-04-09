@@ -128,7 +128,19 @@ def list_task_updates(supabase: Client, project_id: str, task_id: str) -> list[T
         .order("created_at", desc=True)
         .execute()
     )
-    return [TaskUpdateNoteResponse(**row) for row in (r.data or [])] if r else []
+    rows = list(r.data or []) if r else []
+    author_ids = list({row["author_id"] for row in rows if row.get("author_id")})
+    profile_map = {}
+    if author_ids:
+        profiles = get_profiles_by_ids(supabase, author_ids)
+        profile_map = {p.id: _assignee_display_name(p) for p in profiles}
+    return [
+        TaskUpdateNoteResponse(
+            **row,
+            author_name=profile_map.get(row["author_id"]) if row.get("author_id") else None,
+        )
+        for row in rows
+    ]
 
 
 def add_task_update(supabase: Client, project_id: str, task_id: str, author_id: str, payload: TaskUpdateNoteCreate) -> TaskUpdateNoteResponse:
@@ -140,4 +152,9 @@ def add_task_update(supabase: Client, project_id: str, task_id: str, author_id: 
     data = (r.data or [None])[0] if r else None
     if not data:
         raise ValueError("Insert did not return row")
-    return TaskUpdateNoteResponse(**data)
+    author_name = None
+    if author_id:
+        profiles = get_profiles_by_ids(supabase, [author_id])
+        if profiles:
+            author_name = _assignee_display_name(profiles[0])
+    return TaskUpdateNoteResponse(**data, author_name=author_name)
