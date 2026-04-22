@@ -18,6 +18,8 @@ def ensure_profile(
         "email": (core_user or {}).get("email") or current_user.get("email"),
         "full_name": (core_user or {}).get("full_name") or meta.get("full_name") or meta.get("name"),
         "avatar_url": (core_user or {}).get("avatar_url") or meta.get("avatar_url"),
+        "phone_no": (core_user or {}).get("phone_no"),
+        "platform_role": (core_user or {}).get("platform_role"),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
@@ -30,7 +32,7 @@ def get_profiles_by_ids(supabase: Client, user_ids: list[str]) -> list[UserProfi
     if not user_ids:
         return []
     try:
-        r = supabase.schema(DB_SCHEMA).table("profiles").select("id, email, full_name, avatar_url").in_("id", user_ids).execute()
+        r = supabase.schema(DB_SCHEMA).table("profiles").select("id, email, full_name, avatar_url, phone_no, platform_role").in_("id", user_ids).execute()
     except APIError:
         return []
     if not r.data:
@@ -41,6 +43,8 @@ def get_profiles_by_ids(supabase: Client, user_ids: list[str]) -> list[UserProfi
             email=row.get("email"),
             full_name=row.get("full_name"),
             avatar_url=row.get("avatar_url"),
+            phone_no=row.get("phone_no"),
+            platform_role=row.get("platform_role"),
         )
         for row in (r.data or [])
     ]
@@ -48,7 +52,7 @@ def get_profiles_by_ids(supabase: Client, user_ids: list[str]) -> list[UserProfi
 
 def get_me(supabase: Client, user_id: str) -> UserProfileResponse | None:
     try:
-        r = supabase.schema(DB_SCHEMA).table("profiles").select("id, email, full_name, avatar_url").eq("id", user_id).maybe_single().execute()
+        r = supabase.schema(DB_SCHEMA).table("profiles").select("id, email, full_name, avatar_url, phone_no, platform_role").eq("id", user_id).maybe_single().execute()
     except APIError as e:
         if e.code == "204":
             return None
@@ -63,4 +67,6 @@ def get_me(supabase: Client, user_id: str) -> UserProfileResponse | None:
         email=row.get("email"),
         full_name=row.get("full_name"),
         avatar_url=row.get("avatar_url"),
+        phone_no=row.get("phone_no"),
+        platform_role=row.get("platform_role"),
     )

@@ -13,6 +13,8 @@ DDL for Supabase. All application tables live in the **fieldops** schema (not pu
 - **009_expense.sql** – fieldops.expense_transactions
 - **010_expose_fieldops_schema.sql** – grants and expose `fieldops` to PostgREST (fixes PGRST106). Run this last.
 - **011_projects_extra_fields.sql** – add location, address, project_admin_user_id to projects.
+- **020_project_lifecycle.sql** – add status, dates, owner fields to projects; create project_updates table
+- **023_backfill_project_members.sql** – backfill project_members from project admins and task assignments
 
 **If you see PGRST106** (schema must be public or graphql_public): run **010_expose_fieldops_schema.sql** in the SQL Editor.
 

@@ -10,9 +10,12 @@ from app.modules.daily_reports.schemas import (
     DailyReportListResponse,
     DailyReportResponse,
     DailyReportsByDateRangeResponse,
+    DailyReportPhotoEntry,
+    LatestPhotosResponse,
 )
 from app.modules.daily_reports.service import (
     append_entry,
+    get_latest_photos_for_project,
     get_or_create_report,
     get_report_by_id,
     get_report_with_entries,
@@ -26,6 +29,35 @@ from app.modules.daily_reports.service import (
 from supabase import Client
 
 router = APIRouter()
+
+
+@router.get("/latest-photos", response_model=LatestPhotosResponse)
+def latest_photos_route(
+    project_id: str = Query(..., description="Project ID"),
+    access: dict = Depends(get_project_access_query(CAN_VIEW_DAILY_REPORTS)),
+    supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
+):
+    """Get the latest daily report photos for a project (for dashboard cards)."""
+    pid = access["project_id"]
+    # Cache for all users
+    key = CacheKeys.dr_latest_photos(pid)
+    cached = cache_get(redis, key)
+    if cached is not None:
+        return LatestPhotosResponse(**cached)
+
+    result_dict = get_latest_photos_for_project(supabase, pid)
+
+    # Convert dict photos to DailyReportPhotoEntry objects
+    photos = [DailyReportPhotoEntry(**p) for p in result_dict["photos"]]
+    result = LatestPhotosResponse(
+        report_date=result_dict["report_date"],
+        photos=photos
+    )
+
+    cache_set(redis, key, result.model_dump(), ttl=300)  # Cache for 5 minutes
+
+    return result
 
 
 @router.get("/recent-dates", response_model=list[str])
@@ -202,5 +234,6 @@ async def add_report_photo(
         CacheKeys.dr_recent_dates(project_id),
         CacheKeys.dr_list(project_id, report_date),
         CacheKeys.dr_entries_all(project_id, report_date),
+        CacheKeys.dr_latest_photos(project_id),
     )
     return result

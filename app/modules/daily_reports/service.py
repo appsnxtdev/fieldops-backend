@@ -207,3 +207,70 @@ def list_recent_dates_with_reports(
             if len(out) >= limit:
                 break
     return out
+
+
+def get_latest_photos_for_project(supabase: Client, project_id: str) -> dict[str, any]:
+    """
+    Get the latest daily report photos for a project.
+    Returns dict with report_date and list of photo entries.
+    """
+    # First, find the most recent report_date with photos
+    recent_reports = (
+        supabase.schema(DB_SCHEMA)
+        .table("daily_reports")
+        .select("report_date")
+        .eq("project_id", project_id)
+        .order("report_date", desc=True)
+        .limit(10)
+        .execute()
+    )
+
+    if not recent_reports.data:
+        return {"report_date": None, "photos": []}
+
+    # Check each recent date to find the first one with photos
+    for report_row in recent_reports.data:
+        report_date = report_row.get("report_date")
+        if not report_date:
+            continue
+
+        # Get all report IDs for this date
+        reports_for_date = (
+            supabase.schema(DB_SCHEMA)
+            .table("daily_reports")
+            .select("id")
+            .eq("project_id", project_id)
+            .eq("report_date", report_date)
+            .execute()
+        )
+
+        if not reports_for_date.data:
+            continue
+
+        report_ids = [r["id"] for r in reports_for_date.data]
+
+        # Get photo entries for these reports
+        photos_result = (
+            supabase.schema(DB_SCHEMA)
+            .table("daily_report_entries")
+            .select("id, content, sort_order, created_at")
+            .in_("daily_report_id", report_ids)
+            .eq("type", "photo")
+            .order("sort_order")
+            .order("created_at")
+            .execute()
+        )
+
+        if photos_result.data:
+            photos = [
+                {
+                    "id": row["id"],
+                    "content": row["content"],
+                    "sort_order": row["sort_order"],
+                    "created_at": row.get("created_at"),
+                }
+                for row in photos_result.data
+            ]
+            return {"report_date": str(report_date), "photos": photos}
+
+    return {"report_date": None, "photos": []}

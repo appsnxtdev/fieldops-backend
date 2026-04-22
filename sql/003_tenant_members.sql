@@ -2,7 +2,7 @@
 CREATE TABLE IF NOT EXISTS fieldops.tenant_members (
     tenant_id UUID NOT NULL,
     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    role TEXT NOT NULL CHECK (role IN ('org_admin', 'member')),
+    role TEXT NOT NULL CHECK (role IN ('org_admin', 'member', 'viewer', 'demo')),
     created_at TIMESTAMPTZ DEFAULT now(),
     PRIMARY KEY (tenant_id, user_id)
 );

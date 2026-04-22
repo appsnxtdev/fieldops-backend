@@ -50,3 +50,15 @@ class DailyReportDayAggregate(BaseModel):
 
 class DailyReportsByDateRangeResponse(BaseModel):
     by_date: dict[str, DailyReportDayAggregate]
+
+
+class DailyReportPhotoEntry(BaseModel):
+    id: str
+    content: str  # storage path
+    sort_order: int
+    created_at: str | None = None
+
+
+class LatestPhotosResponse(BaseModel):
+    report_date: str | None
+    photos: list[DailyReportPhotoEntry]

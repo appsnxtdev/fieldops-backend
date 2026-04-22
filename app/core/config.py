@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     UPSTASH_REDIS_REST_URL: str = ""
     UPSTASH_REDIS_REST_TOKEN: str = ""
 
+    # Firebase Configuration
+    FIREBASE_PROJECT_ID: str = ""
+    FIREBASE_CREDENTIALS_PATH: str = ""
+
 
 @lru_cache()
 def get_settings() -> Settings:

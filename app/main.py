@@ -8,6 +8,7 @@ from starlette.requests import Request
 
 from app.core.config import get_settings
 from app.core.errors import DEFAULT_MESSAGES, get_user_message
+from app.core.firebase import initialize_firebase
 from app.modules.attendance import routes as attendance_routes
 from app.modules.constants import routes as constants_routes
 from app.modules.dashboard import routes as dashboard_routes
@@ -19,6 +20,7 @@ from app.modules.labour import routes as labour_routes
 from app.modules.master_materials import routes as master_materials_routes
 from app.modules.materials import routes as materials_routes
 from app.modules.mobile import routes as mobile_routes
+from app.modules.notifications import routes as notifications_routes
 from app.modules.projects import routes as projects_routes
 from app.modules.storage import routes as storage_routes
 from app.modules.tasks import routes as tasks_routes
@@ -46,13 +48,12 @@ logging.basicConfig(
     format="%(levelname)s %(name)s %(message)s",
 )
 
-_disable_docs = _settings.ENV == "production"
 app = FastAPI(
     title="FieldOps API",
     version="0.1.0",
-    docs_url=None if _disable_docs else "/docs",
-    redoc_url=None if _disable_docs else "/redoc",
-    openapi_url=None if _disable_docs else "/openapi.json",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 
@@ -97,6 +98,9 @@ def validate_env_on_startup():
         if not _settings.SUPABASE_URL or not _settings.SUPABASE_SERVICE_ROLE_KEY:
             raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required in production")
 
+    # Initialize Firebase
+    initialize_firebase()
+
 
 _origins = [o.strip() for o in _settings.ALLOWED_ORIGINS.split(",") if o.strip()]
 app.add_middleware(
@@ -124,3 +128,4 @@ app.include_router(labour_routes.router, prefix="/api/v1/labour", tags=["labour"
 app.include_router(labour_types_routes.router, prefix="/api/v1/labour-types", tags=["labour-types"])
 app.include_router(mobile_routes.router, prefix="/api/v1/mobile", tags=["mobile"])
 app.include_router(storage_routes.router, prefix="/api/v1/storage", tags=["storage"])
+app.include_router(notifications_routes.router, prefix="/api/v1/notifications", tags=["notifications"])

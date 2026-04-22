@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client
 from app.core.dependencies import (
     get_current_user,
     get_supabase_client,
     get_tenant_id,
+    get_tenant_membership,
     require_tenant_org_admin,
 )
 from app.modules.master_materials.schemas import (
@@ -29,11 +31,10 @@ def _can_edit_master_material(
     tenant_id: str = Depends(get_tenant_id),
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ) -> str:
     """Allow org_admin always; project_admin only if master is used in a project they admin."""
-    from app.core.dependencies import get_tenant_membership
-
-    role = get_tenant_membership(tenant_id, current_user["id"], supabase)
+    role = get_tenant_membership(tenant_id, current_user["id"], supabase, redis=redis)
     if role == "org_admin":
         return master_material_id
     master = get_master_material(supabase, master_material_id, tenant_id)
@@ -50,8 +51,15 @@ def _can_edit_master_material(
 def list_master_materials_route(
     tenant_id: str = Depends(get_tenant_id),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
-    return list_master_materials(supabase, tenant_id)
+    key = CacheKeys.master_materials(tenant_id)
+    cached = cache_get(redis, key)
+    if cached is not None:
+        return cached
+    result = list_master_materials(supabase, tenant_id)
+    cache_set(redis, key, [r.model_dump() for r in result], ttl=600)
+    return result
 
 
 @router.post("", response_model=MasterMaterialResponse, status_code=201)
@@ -59,12 +67,15 @@ def create_master_material_route(
     payload: MasterMaterialCreate,
     tenant_id: str = Depends(require_tenant_org_admin),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     from app.core.constants import MATERIAL_UNITS
 
     if payload.unit not in MATERIAL_UNITS:
         raise HTTPException(status_code=400, detail=f"unit must be one of: {list(MATERIAL_UNITS)}")
-    return create_master_material(supabase, tenant_id, payload)
+    result = create_master_material(supabase, tenant_id, payload)
+    cache_delete(redis, CacheKeys.master_materials(tenant_id))
+    return result
 
 
 @router.patch("/{master_material_id}", response_model=MasterMaterialResponse)
@@ -74,6 +85,7 @@ def update_master_material_route(
     _: str = Depends(_can_edit_master_material),
     tenant_id: str = Depends(get_tenant_id),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     if payload.unit is not None:
         from app.core.constants import MATERIAL_UNITS
@@ -81,9 +93,11 @@ def update_master_material_route(
         if payload.unit not in MATERIAL_UNITS:
             raise HTTPException(status_code=400, detail=f"unit must be one of: {list(MATERIAL_UNITS)}")
     try:
-        return update_master_material(supabase, master_material_id, tenant_id, payload)
+        result = update_master_material(supabase, master_material_id, tenant_id, payload)
     except ValueError:
         raise HTTPException(status_code=404, detail="Master material not found")
+    cache_delete(redis, CacheKeys.master_materials(tenant_id))
+    return result
 
 
 @router.delete("/{master_material_id}", status_code=204)
@@ -92,8 +106,10 @@ def delete_master_material_route(
     _: str = Depends(_can_edit_master_material),
     tenant_id: str = Depends(get_tenant_id),
     supabase: Client = Depends(get_supabase_client),
+    redis=Depends(get_redis_client),
 ):
     try:
         delete_master_material(supabase, master_material_id, tenant_id)
     except Exception:
         raise HTTPException(status_code=404, detail="Master material not found")
+    cache_delete(redis, CacheKeys.master_materials(tenant_id))

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from app.core.cache import CacheKeys, cache_delete, cache_get, cache_set, get_redis_client
 from app.core.dependencies import get_current_user, get_project_access, get_supabase_client
@@ -15,6 +16,8 @@ from app.modules.tasks.schemas import (
 )
 from app.modules.tasks.service import (
     add_task_update,
+    bulk_delete_tasks,
+    bulk_update_tasks,
     create_status,
     create_task,
     delete_status,
@@ -27,6 +30,16 @@ from app.modules.tasks.service import (
     update_task,
 )
 from supabase import Client
+
+
+class BulkUpdateRequest(BaseModel):
+    task_ids: list[str]
+    updates: dict
+
+
+class BulkDeleteRequest(BaseModel):
+    task_ids: list[str]
+
 
 router = APIRouter()
 
@@ -141,7 +154,7 @@ def get_task_route(
 
 
 @router.post("/{project_id}/tasks", response_model=TaskResponse, status_code=201)
-def create_task_route(
+async def create_task_route(
     project_id: str,
     payload: TaskCreate,
     access: dict = Depends(get_project_access(CAN_MANAGE_TASKS)),
@@ -149,13 +162,13 @@ def create_task_route(
     supabase: Client = Depends(get_supabase_client),
     redis=Depends(get_redis_client),
 ):
-    result = create_task(supabase, project_id, current_user["id"], payload)
+    result = await create_task(supabase, project_id, current_user["id"], payload)
     cache_delete(redis, CacheKeys.tasks(project_id))
     return result
 
 
 @router.patch("/{project_id}/tasks/{task_id}", response_model=TaskResponse)
-def update_task_route(
+async def update_task_route(
     project_id: str,
     task_id: str,
     payload: TaskUpdate,
@@ -163,20 +176,21 @@ def update_task_route(
     supabase: Client = Depends(get_supabase_client),
     redis=Depends(get_redis_client),
 ):
-    result = update_task(supabase, task_id, project_id, payload)
+    result = await update_task(supabase, task_id, project_id, payload)
     cache_delete(redis, CacheKeys.tasks(project_id))
     return result
 
 
 @router.delete("/{project_id}/tasks/{task_id}", status_code=204)
-def delete_task_route(
+async def delete_task_route(
     project_id: str,
     task_id: str,
     access: dict = Depends(get_project_access(CAN_MANAGE_TASKS)),
     supabase: Client = Depends(get_supabase_client),
     redis=Depends(get_redis_client),
+    current_user: dict = Depends(get_current_user),
 ):
-    delete_task(supabase, task_id, project_id)
+    await delete_task(supabase, task_id, project_id, current_user["id"])
     cache_delete(redis, CacheKeys.tasks(project_id))
 
 
@@ -191,7 +205,7 @@ def list_task_updates_route(
 
 
 @router.post("/{project_id}/tasks/{task_id}/updates", response_model=TaskUpdateNoteResponse, status_code=201)
-def add_task_update_route(
+async def add_task_update_route(
     project_id: str,
     task_id: str,
     payload: TaskUpdateNoteCreate,
@@ -199,4 +213,47 @@ def add_task_update_route(
     current_user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client),
 ):
-    return add_task_update(supabase, project_id, task_id, current_user["id"], payload)
+    return await add_task_update(supabase, project_id, task_id, current_user["id"], payload)
+
+
+@router.patch("/bulk", status_code=200)
+async def bulk_update_tasks_route(
+    payload: BulkUpdateRequest,
+    supabase: Client = Depends(get_supabase_client),
+    current_user: dict = Depends(get_current_user),
+    redis=Depends(get_redis_client),
+):
+    """Bulk update multiple tasks."""
+    result = await bulk_update_tasks(
+        supabase,
+        payload.task_ids,
+        payload.updates,
+        current_user["id"],
+    )
+
+    # Invalidate cache for affected projects
+    for project_id in result.get("affected_projects", []):
+        cache_delete(redis, CacheKeys.tasks(project_id))
+
+    return result
+
+
+@router.delete("/bulk", status_code=200)
+async def bulk_delete_tasks_route(
+    payload: BulkDeleteRequest,
+    supabase: Client = Depends(get_supabase_client),
+    current_user: dict = Depends(get_current_user),
+    redis=Depends(get_redis_client),
+):
+    """Bulk delete multiple tasks."""
+    result = await bulk_delete_tasks(
+        supabase,
+        payload.task_ids,
+        current_user["id"],
+    )
+
+    # Invalidate cache for affected projects
+    for project_id in result.get("affected_projects", []):
+        cache_delete(redis, CacheKeys.tasks(project_id))
+
+    return result

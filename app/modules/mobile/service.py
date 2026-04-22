@@ -74,8 +74,7 @@ class MobileService:
             if project.get("lat") is not None and project.get("lng") is not None:
                 location = Location(lat=float(project["lat"]), lng=float(project["lng"]))
 
-            # Fetch all data for this project
-            attendance = await self._get_attendance_today(project_id, user_id, today)
+            # Fetch all data for this project (excluding attendance - fetched via separate endpoint)
             tasks = await self._get_my_tasks(project_id, user_id)
             task_statuses = await self._get_task_statuses(project_id)
             materials = await self._get_materials(project_id)
@@ -87,7 +86,7 @@ class MobileService:
                 id=project_id,
                 name=project["name"],
                 location=location,
-                attendance_today=attendance,
+                attendance_today=None,  # Excluded from bulk-sync, use /attendance endpoint
                 my_tasks=tasks,
                 task_statuses=task_statuses,
                 materials=materials,

@@ -131,6 +131,7 @@ def create_credit(
         keys_to_delete.extend([
             CacheKeys.expense(project_id),
             CacheKeys.dashboard(access["tenant_id"], current_user["id"]),
+            CacheKeys.bulk_sync(current_user["id"], access["tenant_id"]),
         ])
 
     cache_delete(redis, *keys_to_delete)
@@ -166,6 +167,7 @@ async def create_debit(
         keys_to_delete.extend([
             CacheKeys.expense(project_id),
             CacheKeys.dashboard(access["tenant_id"], current_user["id"]),
+            CacheKeys.bulk_sync(current_user["id"], access["tenant_id"]),
         ])
 
     cache_delete(redis, *keys_to_delete)

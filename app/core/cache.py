@@ -27,6 +27,14 @@ class CacheKeys:
         return f"ds:p:{tenant_id}:{user_id}:{from_date}:{to_date}"
 
     @staticmethod
+    def labour_trends(tenant_id: str, user_id: str, period_days: int) -> str:
+        return f"ds:ltr:{tenant_id}:{user_id}:{period_days}"
+
+    @staticmethod
+    def material_alerts(tenant_id: str, user_id: str) -> str:
+        return f"ds:ma:{tenant_id}:{user_id}"
+
+    @staticmethod
     def projects_admin(tenant_id: str) -> str:
         return f"pj:{tenant_id}:all"
 
@@ -86,6 +94,14 @@ class CacheKeys:
     def dr_entries_member(project_id: str, user_id: str, date: str) -> str:
         return f"dr:em:{project_id}:{user_id}:{date}"
 
+    @staticmethod
+    def dr_latest_photos(project_id: str) -> str:
+        return f"dr:lp:{project_id}"
+
+    @staticmethod
+    def bulk_sync(user_id: str, tenant_id: str) -> str:
+        return f"bs:{tenant_id}:{user_id}"
+
     # ── Demo user persistent cache keys ──────────────────────────────────────
     # These keys use 'demo:' prefix and have very long TTL for demo UX
     @staticmethod
@@ -95,6 +111,14 @@ class CacheKeys:
     @staticmethod
     def demo_dashboard_period(tenant_id: str, from_date: str, to_date: str) -> str:
         return f"demo:ds:p:{tenant_id}:{from_date}:{to_date}"
+
+    @staticmethod
+    def demo_labour_trends(tenant_id: str, period_days: int) -> str:
+        return f"demo:ds:ltr:{tenant_id}:{period_days}"
+
+    @staticmethod
+    def demo_material_alerts(tenant_id: str) -> str:
+        return f"demo:ds:ma:{tenant_id}"
 
     @staticmethod
     def demo_attendance_bulk(project_id: str, from_date: str, to_date: str) -> str:
